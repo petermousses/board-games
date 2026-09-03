@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: board-games
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - postgres.yaml
+  - api.yaml
+  - web.yaml
+  - ingress.yaml
+  - networkpolicy.yaml
+images:
+  - name: board-games-api
+    newName: ghcr.io/petermousses/board-games-api
+    newTag: latest
+  - name: board-games-web
+    newName: ghcr.io/petermousses/board-games-web
+    newTag: latest
