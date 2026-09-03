@@ -36,6 +36,8 @@ spec:
         app.kubernetes.io/component: api
     spec:
       automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ghcr-pull
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

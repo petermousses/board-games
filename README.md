@@ -37,6 +37,15 @@ The checked-in manifests use the workflow’s `develop` tags as a bootstrap refe
 
 create the secret from `deploy/k8s/secret.example.yaml` **outside this repository** after replacing both placeholders with the same strong random password. This cluster serves the app at `games.omv.mousses.xyz`; other clusters should replace that host in `deploy/k8s/ingress.yaml` and the Certificate resources.
 
+The GHCR packages are private, so create the image pull Secret outside this repository before applying the kustomization. Use a GitHub classic PAT with `read:packages`:
+
+```sh
+kubectl -n board-games create secret docker-registry ghcr-pull \
+  --docker-server=ghcr.io \
+  --docker-username=petermousses \
+  --docker-password="$CR_PAT"
+```
+
 then apply and watch the migration plus rollouts:
 
 ```sh
