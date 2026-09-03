@@ -3,16 +3,21 @@ kind: Kustomization
 namespace: board-games
 resources:
   - namespace.yaml
+  - storage-class.yaml
+  - persistent-volume.yaml
+  - persistent-volume-claim.yaml
   - configmap.yaml
   - postgres.yaml
   - api.yaml
   - web.yaml
   - ingress.yaml
+  - certificate.yaml
+  - certificate-staging.yaml
   - networkpolicy.yaml
 images:
   - name: board-games-api
     newName: ghcr.io/petermousses/board-games-api
-    newTag: latest
+    newTag: local-f68dd2f
   - name: board-games-web
     newName: ghcr.io/petermousses/board-games-web
-    newTag: latest
+    newTag: local-f68dd2f

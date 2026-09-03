@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: board-games-postgres
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: board-games
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: board-games-local
+  volumeName: board-games-postgres
+  resources:
+    requests:
+      storage: 10Gi

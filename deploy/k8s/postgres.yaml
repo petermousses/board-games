@@ -36,6 +36,8 @@ spec:
         app.kubernetes.io/component: database
     spec:
       automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: openmediavault
       securityContext:
         fsGroup: 999
         fsGroupChangePolicy: OnRootMismatch
@@ -101,11 +103,7 @@ spec:
             - name: data
               mountPath: /var/lib/postgresql/data
       terminationGracePeriodSeconds: 60
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        resources:
-          requests:
-            storage: 10Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: board-games-postgres
