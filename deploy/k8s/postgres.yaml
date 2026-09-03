@@ -43,7 +43,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: postgres
-          image: postgres:17.6-alpine
+          image: postgres@sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be
           imagePullPolicy: IfNotPresent
           ports:
             - name: postgres
