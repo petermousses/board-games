@@ -17,7 +17,7 @@ resources:
 images:
   - name: board-games-api
     newName: ghcr.io/petermousses/board-games-api
-    newTag: sha-ed56a3df7790c4b4a95fb43b9763568ebae3e47b
+    newTag: develop
   - name: board-games-web
     newName: ghcr.io/petermousses/board-games-web
-    newTag: sha-ed56a3df7790c4b4a95fb43b9763568ebae3e47b
+    newTag: develop
