@@ -33,7 +33,7 @@ serve the `web/` directory through a same-origin proxy to the API for local brow
 
 The GitHub Actions workflow in `.github/workflows/container-image.yml` builds and publishes both images to GHCR on pushes to `develop` and version tags. It gives each image commit-derived `sha-*` tags; use the resulting immutable image digests in `deploy/k8s/kustomization.yaml` for a registry-backed deployment. Do not deploy `latest` in a real environment.
 
-The checked-in manifests are currently prepared for this single-node k3s host: the two application images use the local `local-f68dd2f` tags and `imagePullPolicy: Never`. Build those tags from this commit and import them into the k3s containerd image store before applying the kustomization. Once GHCR images have been published, replace those local references with their digests and change the pull policy to `IfNotPresent`.
+The checked-in manifests use the commit-derived `sha-ed56a3df7790c4b4a95fb43b9763568ebae3e47b` tags for the current deployment commit and pull them from GHCR. After publishing a newer commit, update both image tags to that commit’s `sha-*` tag or, preferably, its resolved registry digest.
 
 create the secret from `deploy/k8s/secret.example.yaml` **outside this repository** after replacing both placeholders with the same strong random password. This cluster serves the app at `games.omv.mousses.xyz`; other clusters should replace that host in `deploy/k8s/ingress.yaml` and the Certificate resources.
 

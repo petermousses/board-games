@@ -45,7 +45,7 @@ spec:
       containers:
         - name: api
           image: board-games-api
-          imagePullPolicy: Never
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
