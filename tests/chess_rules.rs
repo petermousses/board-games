@@ -228,6 +228,40 @@ fn repetition_claims_and_automatic_fivefold_survive_serialization() {
 
 #[test]
 fn fifty_move_claim_seventy_five_automatic_and_mate_precedence() {
+    let mut announced = ChessState::from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 99 1").unwrap();
+    let before_announcement = announced.clone();
+    assert!(
+        announced.view_for(0)["draw_claim_moves"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("a1a2"))
+    );
+    announced
+        .apply(
+            0,
+            &ChessAction::ClaimDrawAfterMove {
+                from: "a1".into(),
+                to: "a2".into(),
+                promotion: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        announced.draw_reason.as_deref(),
+        Some("fifty_move_rule_after_announced_move")
+    );
+    assert_eq!(announced.fen, before_announcement.fen);
+    let mut bad_announcement = before_announcement.clone();
+    rejects(
+        &mut bad_announcement,
+        0,
+        ChessAction::ClaimDrawAfterMove {
+            from: "a1".into(),
+            to: "a2".into(),
+            promotion: Some("q".into()),
+        },
+        RuleError::IllegalMove,
+    );
     let mut fifty = ChessState::from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 99 1").unwrap();
     play(&mut fifty, "a1a2");
     assert_eq!(fifty.halfmove_clock, 100);

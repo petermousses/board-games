@@ -29,6 +29,13 @@ pub enum ChessAction {
     Resign,
     /// Claim a threefold repetition or 50-move draw in the current position.
     ClaimDraw,
+    /// Claim a draw by recording a legal move that would create the entitlement.
+    /// FIDE permits this before the move is made; the position stays unchanged.
+    ClaimDrawAfterMove {
+        from: String,
+        to: String,
+        promotion: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -105,28 +112,9 @@ impl ChessState {
                 to,
                 promotion,
             } => {
-                // Validate each field separately so concatenated malformed fields cannot
-                // accidentally become a valid UCI move.
-                let _from: Square = from.parse().map_err(|_| RuleError::InvalidMove)?;
-                let _to: Square = to.parse().map_err(|_| RuleError::InvalidMove)?;
-                if promotion
-                    .as_deref()
-                    .is_some_and(|p| !matches!(p, "q" | "r" | "b" | "n"))
-                {
-                    return Err(RuleError::InvalidMove);
-                }
-                let uci = format!("{from}{to}{}", promotion.as_deref().unwrap_or(""));
-                let mv = parse_uci_move(&board, &uci).map_err(|_| RuleError::InvalidMove)?;
-                // Reject the engine's king-captures-rook encoding at our UCI boundary.
-                if display_uci_move(&board, mv).to_string() != uci {
-                    return Err(RuleError::IllegalMove);
-                }
+                let mv = standard_uci_move(&board, from, to, promotion)?;
                 board.try_play(mv).map_err(|_| RuleError::IllegalMove)?;
-                let halfmove_clock = if board.halfmove_clock() == 0 {
-                    0
-                } else {
-                    self.halfmove_clock.saturating_add(1)
-                };
+                let halfmove_clock = self.next_halfmove_clock(&board);
                 let mut next = self.clone();
                 next.halfmove_clock = halfmove_clock;
                 next.fen = fen_with_clock(&board, halfmove_clock);
@@ -143,6 +131,24 @@ impl ChessState {
                     "threefold_repetition"
                 } else if self.halfmove_clock >= 100 {
                     "fifty_move_rule"
+                } else {
+                    return Err(RuleError::InvalidDrawClaim);
+                };
+                self.draw = true;
+                self.draw_reason = Some(reason.into());
+            }
+            ChessAction::ClaimDrawAfterMove {
+                from,
+                to,
+                promotion,
+            } => {
+                let mv = standard_uci_move(&board, from, to, promotion)?;
+                let mut after = board.clone();
+                after.try_play(mv).map_err(|_| RuleError::IllegalMove)?;
+                let reason = if self.repetitions(&after).saturating_add(1) >= 3 {
+                    "threefold_repetition_after_announced_move"
+                } else if self.next_halfmove_clock(&after) >= 100 {
+                    "fifty_move_rule_after_announced_move"
                 } else {
                     return Err(RuleError::InvalidDrawClaim);
                 };
@@ -195,6 +201,7 @@ impl ChessState {
             "draw": self.draw, "draw_reason": self.draw_reason,
             "in_check": parsed.as_ref().is_some_and(|board| !board.checkers().is_empty()),
             "legal_moves": self.legal_moves(), "can_claim_draw": can_claim_draw,
+            "draw_claim_moves": parsed.as_ref().map(|board| self.draw_claim_moves(board)).unwrap_or_default(),
             "rows": 8, "columns": 8,
         })
     }
@@ -204,6 +211,34 @@ impl ChessState {
             .iter()
             .filter(|fen| parse_position(fen).is_ok_and(|(past, _)| board.same_position(&past)))
             .count()
+    }
+
+    fn next_halfmove_clock(&self, board_after: &Board) -> u16 {
+        if board_after.halfmove_clock() == 0 {
+            0
+        } else {
+            self.halfmove_clock.saturating_add(1)
+        }
+    }
+
+    fn draw_claim_moves(&self, board: &Board) -> Vec<String> {
+        if self.is_complete() {
+            return Vec::new();
+        }
+        legal_moves(board)
+            .into_iter()
+            .filter(|uci| {
+                let Ok(mv) = parse_uci_move(board, uci) else {
+                    return false;
+                };
+                let mut after = board.clone();
+                if after.try_play(mv).is_err() {
+                    return false;
+                }
+                self.repetitions(&after).saturating_add(1) >= 3
+                    || self.next_halfmove_clock(&after) >= 100
+            })
+            .collect()
     }
 
     fn adjudicate(&mut self, board: &Board) {
@@ -267,6 +302,31 @@ fn legal_moves(board: &Board) -> Vec<String> {
     });
     moves.sort();
     moves
+}
+
+fn standard_uci_move(
+    board: &Board,
+    from: &str,
+    to: &str,
+    promotion: &Option<String>,
+) -> Result<cozy_chess::Move, RuleError> {
+    // Validate each field separately so concatenated malformed fields cannot
+    // accidentally become a valid UCI move.
+    let _from: Square = from.parse().map_err(|_| RuleError::InvalidMove)?;
+    let _to: Square = to.parse().map_err(|_| RuleError::InvalidMove)?;
+    if promotion
+        .as_deref()
+        .is_some_and(|piece| !matches!(piece, "q" | "r" | "b" | "n"))
+    {
+        return Err(RuleError::InvalidMove);
+    }
+    let uci = format!("{from}{to}{}", promotion.as_deref().unwrap_or(""));
+    let mv = parse_uci_move(board, &uci).map_err(|_| RuleError::InvalidMove)?;
+    // Reject the engine's king-captures-rook encoding at our UCI boundary.
+    if display_uci_move(board, mv).to_string() != uci {
+        return Err(RuleError::IllegalMove);
+    }
+    Ok(mv)
 }
 
 /// Conservative dead-position detection: bare kings, one minor piece, or only
