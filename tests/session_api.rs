@@ -74,7 +74,8 @@ async fn checkers_join_and_concurrent_moves_are_serialized() {
     )
     .await;
     assert_eq!(resumed.0, StatusCode::OK);
-    assert_eq!(resumed.1["state_version"], 1);
+    // Joining is a versioned membership change, followed by one accepted move.
+    assert_eq!(resumed.1["state_version"], 2);
     assert_eq!(resumed.1["state"]["state"]["side_to_move"], "black");
 
     let unauthorized = send_json(

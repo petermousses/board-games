@@ -26,6 +26,7 @@ pub fn router(store: Store) -> Router {
         .route("/api/v1/sessions", post(create_session))
         .route("/api/v1/sessions/{id}", get(get_session))
         .route("/api/v1/sessions/{id}/join", post(join_session))
+        .route("/api/v1/sessions/{id}/start", post(start_session))
         .route("/api/v1/sessions/{id}/actions", post(apply_action))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .with_state(AppState { store })
@@ -79,10 +80,24 @@ async fn join_session(
     validate_display_name(&request.display_name)?;
     let session = state
         .store
-        .join_checkers(id, request.display_name)
+        .join_session(id, request.display_name)
         .await
         .map_err(ApiError::from)?;
     Ok((StatusCode::CREATED, Json(session)))
+}
+
+async fn start_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<SessionView>, ApiError> {
+    let access_token = bearer_token(&headers)?;
+    let session = state
+        .store
+        .start_session(id, &access_token)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(session))
 }
 
 async fn apply_action(
@@ -92,9 +107,14 @@ async fn apply_action(
     Json(request): Json<ActionRequest>,
 ) -> Result<Json<SessionView>, ApiError> {
     let access_token = bearer_token(&headers)?;
+    if request.expected_version.is_some_and(|version| version < 0) {
+        return Err(ApiError::bad_request(
+            "expected_version must be nonnegative",
+        ));
+    }
     let session = state
         .store
-        .apply_action(id, &access_token, &request.action)
+        .apply_action(id, &access_token, &request.action, request.expected_version)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(session))
@@ -114,6 +134,9 @@ struct JoinSessionRequest {
 #[derive(Debug, Deserialize)]
 struct ActionRequest {
     action: GameAction,
+    /// Omission preserves clients created before optimistic version checks existed.
+    #[serde(default)]
+    expected_version: Option<i64>,
 }
 
 fn validate_display_name(display_name: &str) -> Result<(), ApiError> {
@@ -183,6 +206,10 @@ impl From<StoreError> for ApiError {
                 message: "session does not exist",
             },
             StoreError::Unauthorized => Self::unauthorized("session access is unauthorized"),
+            StoreError::Forbidden(message) => Self {
+                status: StatusCode::FORBIDDEN,
+                message,
+            },
             StoreError::Conflict(message) => Self {
                 status: StatusCode::CONFLICT,
                 message,
