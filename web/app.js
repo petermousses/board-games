@@ -13,6 +13,8 @@ let currentSession = null;
 let table = null;
 let Table = null;
 let tableLoad = null;
+let graphicsUnavailable = false;
+let tableView = { top: false, orbit: false };
 let draft = {};
 let mutationInFlight = false;
 let pollTimer = null;
@@ -104,18 +106,24 @@ function loadTable() {
 }
 
 function ensureTable(sessionId) {
-  if (table) return;
+  if (table || graphicsUnavailable) return;
   const canvas = document.querySelector("#game-canvas");
   if (!canvas) return;
   if (!Table) {
     loadTable().then(() => {
       if (!table && currentSession?.id === sessionId && document.querySelector("#session-root")?.dataset.id === sessionId) renderSession();
-    }).catch(() => graphicsError("this browser couldn’t load the 3D table. reload to try again; your game is still saved."));
+    }).catch(() => {
+      graphicsUnavailable = true;
+      graphicsError("this browser couldn’t load the 3D table. reload to try again; your game is still saved.");
+    });
     return;
   }
   try {
     table = new Table(canvas, handlePick, graphicsError);
+    table.setTop(tableView.top);
+    table.setOrbit(tableView.orbit);
   } catch {
+    graphicsUnavailable = true;
     graphicsError("this browser couldn’t start WebGL. enable hardware acceleration or use another browser for the 3D table.");
   }
 }
@@ -128,6 +136,8 @@ async function renderRoute() {
   currentSession = null;
   draft = {};
   mutationInFlight = false;
+  graphicsUnavailable = false;
+  tableView = { top: false, orbit: false };
 
   const id = new URLSearchParams(location.search).get("session");
   const generation = responses.enter(id);
@@ -259,11 +269,13 @@ function renderSession() {
     document.querySelector("#view-top").onclick = (event) => {
       const active = event.currentTarget.getAttribute("aria-pressed") !== "true";
       event.currentTarget.setAttribute("aria-pressed", String(active));
+      tableView.top = active;
       table?.setTop(active);
     };
     document.querySelector("#view-orbit").onclick = (event) => {
       const active = event.currentTarget.getAttribute("aria-pressed") !== "true";
       event.currentTarget.setAttribute("aria-pressed", String(active));
+      tableView.orbit = active;
       table?.setOrbit(active);
     };
     document.querySelector("#copy-private").onclick = () => copyResumeCode();
