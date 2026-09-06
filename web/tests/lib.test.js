@@ -64,3 +64,17 @@ test("every advertised game creates a Three.js board model", () => {
     assert.ok(model.tiles.length > 0, `${game} renders playable spaces`);
   }
 });
+test("battleship shows a sunk ship differently from an ordinary hit", () => {
+  const state = { phase: "playing", own_board: Array(100).fill(0), target_board: Array(100).fill(0), turn: 0 };
+  const session = (target) => ({ game_type: "battleship", you: { player_index: 0 }, state: { state: { ...state, target_board: target } } });
+  const hit = [...state.target_board];
+  const sunk = [...state.target_board];
+  hit[5] = 3;
+  sunk[5] = 4;
+  const targetAt = (model) => model.tiles.find((item) => !item.pick.own && item.pick.row === 0 && item.pick.column === 5);
+  const markerAt = (model) => model.pieces.find((item) => !item.pick.own && item.pick.row === 0 && item.pick.column === 5);
+  assert.equal(targetAt(boardModel(session(hit))).label, "target F1: hit");
+  assert.equal(targetAt(boardModel(session(sunk))).label, "target F1: sunk");
+  assert.equal(markerAt(boardModel(session(hit))).type, "pin");
+  assert.equal(markerAt(boardModel(session(sunk))).type, "sunk");
+});

@@ -102,9 +102,10 @@ function battleshipModel(state, draft, compact) {
       const p = (side === 0 ? state.own_board : state.target_board)?.[index] || 0;
       const ship = p === 1 || (side === 0 && state.phase === "setup" && preview.has(index));
       const pick = { kind: "battleship", own: side === 0, row, column };
-      tile(model, x, z, ship ? "#acbcb5" : C.ocean, `${side === 0 ? "own" : "target"} ${String.fromCharCode(65 + column)}${row + 1}: ${p >= 3 ? "hit" : p === 2 ? "miss" : ship ? "ship" : "untried"}`, pick, { width: 0.63, depth: 0.63 });
+      const status = p === 4 ? "sunk" : p === 3 ? "hit" : p === 2 ? "miss" : ship ? "ship" : "untried";
+      tile(model, x, z, p === 4 ? "#9b7541" : ship ? "#acbcb5" : C.ocean, `${side === 0 ? "own" : "target"} ${String.fromCharCode(65 + column)}${row + 1}: ${status}`, pick, { width: 0.63, depth: 0.63 });
       if (ship) piece(model, x, z, "#d0d5c4", "ship", pick, { scale: 0.55 });
-      if (p >= 2) piece(model, x, z, p >= 3 ? C.coral : C.white, "pin", pick, { scale: 0.6 });
+      if (p >= 2) piece(model, x, z, p === 4 ? "#e6b957" : p === 3 ? C.coral : C.white, p === 4 ? "sunk" : "pin", pick, { scale: 0.6 });
     }
   }
   return model;

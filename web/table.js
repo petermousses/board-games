@@ -135,6 +135,7 @@ export class Table {
     }
     if (item.type === "ship") { add(new THREE.BoxGeometry(0.7, 0.25, 0.7), 0.12); return; }
     if (item.type === "pin") { add(new THREE.CylinderGeometry(0.12, 0.15, 0.22, 16), 0.11); add(new THREE.SphereGeometry(0.22, 16, 12), 0.28); return; }
+    if (item.type === "sunk") { add(new THREE.CylinderGeometry(0.22, 0.26, 0.14, 4), 0.1); add(new THREE.ConeGeometry(0.24, 0.26, 4), 0.28); return; }
     const role = item.type === "pawn" ? "p" : item.role;
     const points = [[0.01, 0], [0.36, 0], [0.37, 0.08], [0.29, 0.14], [0.28, 0.19], [0.18, 0.25], [0.12, 0.48], [0.18, 0.52], [0.18, 0.59], [0.01, 0.59]];
     const height = role === "p" ? 0.78 : role === "k" || role === "q" ? 1.18 : 1;
