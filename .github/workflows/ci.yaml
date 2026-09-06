@@ -34,10 +34,12 @@ jobs:
           components: rustfmt, clippy
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.12.0
       - uses: azure/setup-kubectl@v4
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test
-      - run: node --check web/app.js
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
       - run: kubectl kustomize deploy/k8s > /dev/null
