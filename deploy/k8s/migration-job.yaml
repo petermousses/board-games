@@ -7,8 +7,8 @@ metadata:
     app.kubernetes.io/part-of: board-games
     app.kubernetes.io/component: migration
 spec:
-  backoffLimit: 2
-  activeDeadlineSeconds: 300
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
   template:
     metadata:
       labels:

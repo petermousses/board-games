@@ -3,7 +3,7 @@ set -euo pipefail
 
 namespace="board-games"
 migration_job="board-games-migrate"
-wait_timeout="5m"
+wait_timeout="11m"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 existing_job="$(kubectl -n "$namespace" get job "$migration_job" --ignore-not-found -o name)"
