@@ -103,7 +103,11 @@ spec:
             - name: data
               mountPath: /var/lib/postgresql/data
       terminationGracePeriodSeconds: 60
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: board-games-postgres
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

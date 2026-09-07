@@ -3,9 +3,6 @@ kind: Kustomization
 namespace: board-games
 resources:
   - namespace.yaml
-  - storage-class.yaml
-  - persistent-volume.yaml
-  - persistent-volume-claim.yaml
   - configmap.yaml
   - postgres.yaml
   - migration-job.yaml
