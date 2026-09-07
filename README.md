@@ -57,16 +57,14 @@ kubectl -n board-games create secret docker-registry ghcr-pull \
   --docker-password="$CR_PAT"
 ```
 
-then apply and watch the migration plus rollouts:
+then run the ordered migration-first deployment:
 
 ```sh
 kubectl apply -f /secure/path/board-games-secrets.yaml
-kubectl apply -k deploy/k8s
-kubectl -n board-games rollout status deployment/board-games-api
-kubectl -n board-games rollout status deployment/board-games-web
+scripts/deploy-k8s.sh
 ```
 
-each API replica runs embedded migrations before it starts listening; a PostgreSQL advisory lock serializes that step. The readiness probe also checks for the migrated `game_sessions` table, so traffic stays out until migrations succeed.
+The manifest deliberately keeps the API rollout paused. The script refuses an active or failed prior migration Job, removes only a completed one, applies the manifests, waits for the bounded migration Job, then resumes and verifies the API and web rollouts. API readiness validates every embedded SQLx migration against `_sqlx_migrations`, including success and checksum, before accepting traffic.
 
 ## verification
 

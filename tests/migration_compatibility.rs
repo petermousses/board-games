@@ -2,7 +2,7 @@ use std::env;
 
 use board_games::{
     domain::{GameAction, GameType, checkers::CheckersMove, solitaire::SolitaireAction},
-    store::Store,
+    store::{MIGRATOR, Store},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -66,11 +66,19 @@ async fn additive_migration_preserves_legacy_games_tokens_and_events() {
     }
 
     let store = Store::connect(&legacy_url).await.unwrap();
+    assert!(
+        store.health_check().await.is_err(),
+        "readiness must reject a schema missing an embedded migration"
+    );
     // Covers both first upgrade and simultaneous replica migration startup.
     let (first, second) = tokio::join!(store.migrate(), store.migrate());
     first.expect("first migration");
     second.expect("concurrent migration");
     store.migrate().await.expect("idempotent migration");
+    store
+        .health_check()
+        .await
+        .expect("readiness after normal migration");
     for (session_id, game_type, raw) in fixtures {
         let loaded = store
             .load_authorized(session_id, &token)
@@ -122,6 +130,91 @@ async fn additive_migration_preserves_legacy_games_tokens_and_events() {
     }
     drop(store);
     legacy_pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("remove isolated schema");
+}
+
+#[tokio::test]
+async fn readiness_rejects_invalid_migration_ledger_entries() {
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL");
+    let admin = PgPool::connect(&database_url).await.expect("postgres");
+    let schema = format!("migration_ready_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .expect("isolated schema");
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let isolated_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+    let isolated_pool = PgPool::connect(&isolated_url)
+        .await
+        .expect("isolated connection");
+    let store = Store::connect(&isolated_url)
+        .await
+        .expect("isolated connection");
+    store.migrate().await.expect("normal migration");
+    store
+        .health_check()
+        .await
+        .expect("healthy migration ledger");
+
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| migration.migration_type.is_up_migration())
+        .expect("embedded migration");
+
+    sqlx::query("UPDATE _sqlx_migrations SET success = false WHERE version = $1")
+        .bind(migration.version)
+        .execute(&isolated_pool)
+        .await
+        .expect("mark migration unsuccessful");
+    assert!(
+        store.health_check().await.is_err(),
+        "readiness must reject an unsuccessful migration"
+    );
+    sqlx::query("UPDATE _sqlx_migrations SET success = true WHERE version = $1")
+        .bind(migration.version)
+        .execute(&isolated_pool)
+        .await
+        .expect("restore successful migration");
+
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = $2")
+        .bind(vec![0_u8])
+        .bind(migration.version)
+        .execute(&isolated_pool)
+        .await
+        .expect("change migration checksum");
+    assert!(
+        store.health_check().await.is_err(),
+        "readiness must reject a checksum mismatch"
+    );
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = $2")
+        .bind(migration.checksum.as_ref())
+        .bind(migration.version)
+        .execute(&isolated_pool)
+        .await
+        .expect("restore migration checksum");
+    store
+        .health_check()
+        .await
+        .expect("restored migration ledger");
+
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+         VALUES (9999, 'unexpected', true, $1, 0)",
+    )
+    .bind(vec![0_u8])
+    .execute(&isolated_pool)
+    .await
+    .expect("insert unexpected migration");
+    assert!(
+        store.health_check().await.is_err(),
+        "readiness must reject an unexpected applied migration"
+    );
+
+    drop(store);
+    isolated_pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await

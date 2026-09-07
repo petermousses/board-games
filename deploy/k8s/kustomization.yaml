@@ -8,6 +8,7 @@ resources:
   - persistent-volume-claim.yaml
   - configmap.yaml
   - postgres.yaml
+  - migration-job.yaml
   - api.yaml
   - web.yaml
   - ingress.yaml

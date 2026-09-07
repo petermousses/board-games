@@ -180,6 +180,43 @@ impl Store {
     }
 
     pub async fn health_check(&self) -> Result<(), StoreError> {
+        let applied_migrations = sqlx::query_as::<_, AppliedMigration>(
+            "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let expected_migrations = MIGRATOR
+            .iter()
+            .filter(|migration| migration.migration_type.is_up_migration())
+            .collect::<Vec<_>>();
+
+        for migration in &expected_migrations {
+            let Some(applied_migration) = applied_migrations
+                .iter()
+                .find(|applied_migration| applied_migration.version == migration.version)
+            else {
+                return Err(
+                    sqlx::migrate::MigrateError::VersionNotPresent(migration.version).into(),
+                );
+            };
+            if !applied_migration.success {
+                return Err(sqlx::migrate::MigrateError::Dirty(migration.version).into());
+            }
+            if applied_migration.checksum != migration.checksum.as_ref() {
+                return Err(sqlx::migrate::MigrateError::VersionMismatch(migration.version).into());
+            }
+        }
+
+        if let Some(unexpected_migration) = applied_migrations.iter().find(|applied_migration| {
+            !expected_migrations
+                .iter()
+                .any(|migration| migration.version == applied_migration.version)
+        }) {
+            return Err(
+                sqlx::migrate::MigrateError::VersionMissing(unexpected_migration.version).into(),
+            );
+        }
+
         sqlx::query("SELECT 1 FROM game_sessions LIMIT 0")
             .execute(&self.pool)
             .await?;
@@ -586,6 +623,13 @@ struct ParticipantRow {
     id: Uuid,
     seat: String,
     display_name: String,
+}
+
+#[derive(Debug, FromRow)]
+struct AppliedMigration {
+    version: i64,
+    success: bool,
+    checksum: Vec<u8>,
 }
 
 fn new_access_token() -> (String, Vec<u8>) {
