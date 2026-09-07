@@ -24,6 +24,11 @@ if [[ -n "$existing_job" ]]; then
   fi
 fi
 
+existing_api_deployment="$(kubectl -n "$namespace" get deployment board-games-api --ignore-not-found -o name)"
+if [[ -n "$existing_api_deployment" ]]; then
+  kubectl -n "$namespace" rollout pause deployment/board-games-api
+fi
+
 kubectl apply -k "$repo_root/deploy/k8s"
 kubectl -n "$namespace" wait --for=condition=Complete "job/$migration_job" --timeout="$wait_timeout"
 kubectl -n "$namespace" rollout resume deployment/board-games-api
