@@ -3,16 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Persistent solitaire and multiplayer checkers." />
+    <meta name="description" content="Eight timeless games. One shared Three.js tabletop. Pick a game, invite your people, and keep playing." />
     <title>tabletop</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <header class="site-header">
-      <a class="brand" href="/">tabletop<span>_</span></a>
-      <p>small games. durable sessions.</p>
+      <a class="brand" href="/" aria-label="tabletop home"><span class="brand-mark">t.</span> tabletop</a>
+      <p>good company. great games.</p>
+      <span class="header-note">the classics collection</span>
     </header>
-    <main id="app" aria-live="polite"></main>
+    <main id="app"></main>
+    <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

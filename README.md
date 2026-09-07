@@ -1,21 +1,25 @@
 # tabletop
 
-a small, rust-backed web experience for persistent games:
+a small, rust-backed web experience for persistent games, rendered as interactive 3D tables with Three.js:
 
-- **solitaire:** one player, server-validated klondike moves, resumable from any browser that retains its private access token.
-- **checkers:** two players, invite-by-session link, server-authoritative turns, forced captures, atomic multi-jumps, and promotion.
+- **solitaire:** one player, server-validated Klondike moves, resumable from any browser that retains its private access token.
+- **chess:** two players, legal move generation, castling, en passant, promotion, checkmate, and claimable or automatic draws.
+- **battleship:** two players, private fleets, server-side placement validation, and redacted opponent waters.
+- **Clue:** three to six players, a compact original room map, private hands and refutations, suggestions, accusations, and elimination.
+- **checkers:** two players, forced captures, atomic multi-jumps, and promotion.
+- **connect four, reversi, and tic-tac-toe:** two-player server-authoritative classics.
 
 ## architecture
 
 the application has three deployable tiers:
 
-1. **web:** nginx serves the browser client and reverse-proxies same-origin `/api/` requests.
+1. **web:** Vite bundles a native ES-module Three.js client; nginx serves the static build and reverse-proxies same-origin `/api/` requests.
 2. **api:** an axum service owns validation and every state transition. replicas retain no game state.
 3. **database:** PostgreSQL stores session snapshots, append-only action events, and hashed 256-bit per-seat bearer tokens.
 
-the API locks one session row while it validates and saves an action, then advances its version and writes the matching event in the same transaction. this keeps a checkers move correct even when requests land on different API pods.
+the API locks one session row while it validates and saves an action, then advances its version and writes the matching event in the same transaction. that keeps every game action correct even when requests land on different API pods. Per-player state views redact hidden Battleship fleets, Clue hands, refutation choices, and private reveals before a response leaves the API.
 
-`src/domain/` contains pure game rules over compact arrays: 32 playable checkers squares and 0–51 card values. Adding a game means adding a state/action variant and its isolated rules module; HTTP, persistence, and the client session mechanics stay shared.
+`src/domain/` contains pure game rules and isolated state/action variants. HTTP, persistence, session membership, optimistic state versions, and client session mechanics stay shared.
 
 ## local development
 
@@ -27,7 +31,14 @@ cargo run -- migrate
 cargo run -- serve
 ```
 
-serve the `web/` directory through a same-origin proxy to the API for local browser work. The production web container already supplies that proxy.
+in another terminal, install the pinned browser dependencies and use Vite's same-origin API proxy:
+
+```sh
+npm ci
+npm run dev
+```
+
+Set `API_PROXY_TARGET` when the API is not listening on `127.0.0.1:8080`. The production web container builds the same Vite bundle and supplies the proxy.
 
 ## k3s deployment
 
@@ -46,25 +57,23 @@ kubectl -n board-games create secret docker-registry ghcr-pull \
   --docker-password="$CR_PAT"
 ```
 
-then apply and watch the migration plus rollouts:
+then run the ordered migration-first deployment:
 
 ```sh
 kubectl apply -f /secure/path/board-games-secrets.yaml
-kubectl apply -k deploy/k8s
-kubectl -n board-games rollout status deployment/board-games-api
-kubectl -n board-games rollout status deployment/board-games-web
+scripts/deploy-k8s.sh
 ```
 
-each API replica runs embedded migrations before it starts listening; a PostgreSQL advisory lock serializes that step. The readiness probe also checks for the migrated `game_sessions` table, so traffic stays out until migrations succeed.
+The manifest deliberately keeps the API rollout paused. The script refuses an active or failed prior migration Job, removes only a completed one, applies the manifests, waits for the bounded migration Job, then resumes and verifies the API and web rollouts. API readiness validates every embedded SQLx migration against `_sqlx_migrations`, including success and checksum, before accepting traffic.
 
 ## verification
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked
+npm ci
+npm run build
+npm test
 kubectl kustomize deploy/k8s
-node --check web/app.js
 ```
-
-the current workstation’s macOS compiler toolchain and Docker daemon are unavailable; CI should run the Rust commands in a Linux builder before release.

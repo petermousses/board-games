@@ -3,12 +3,12 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{FromRow, PgPool, postgres::PgPoolOptions, types::Json};
+use sqlx::{FromRow, PgConnection, PgPool, postgres::PgPoolOptions, types::Json};
 use uuid::Uuid;
 
-use crate::domain::{GameAction, GameState, GameType, checkers::Side};
+use crate::domain::{GameAction, GameState, GameType};
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
@@ -21,7 +21,8 @@ pub struct Store {
 pub struct SessionView {
     pub id: Uuid,
     pub game_type: GameType,
-    pub state: GameState,
+    /// Redacted per-seat state. Never serialize the persistent GameState here.
+    pub state: Value,
     pub state_version: i64,
     pub status: SessionStatus,
     pub you: Participant,
@@ -39,6 +40,7 @@ pub struct SessionAccess {
 pub struct Participant {
     pub id: Uuid,
     pub seat: Seat,
+    pub player_index: u8,
     pub display_name: String,
 }
 
@@ -48,6 +50,12 @@ pub enum Seat {
     Solitaire,
     Red,
     Black,
+    Player1,
+    Player2,
+    Player3,
+    Player4,
+    Player5,
+    Player6,
 }
 
 impl Seat {
@@ -56,6 +64,12 @@ impl Seat {
             Self::Solitaire => "solitaire",
             Self::Red => "red",
             Self::Black => "black",
+            Self::Player1 => "player1",
+            Self::Player2 => "player2",
+            Self::Player3 => "player3",
+            Self::Player4 => "player4",
+            Self::Player5 => "player5",
+            Self::Player6 => "player6",
         }
     }
 
@@ -64,8 +78,50 @@ impl Seat {
             "solitaire" => Ok(Self::Solitaire),
             "red" => Ok(Self::Red),
             "black" => Ok(Self::Black),
+            "player1" => Ok(Self::Player1),
+            "player2" => Ok(Self::Player2),
+            "player3" => Ok(Self::Player3),
+            "player4" => Ok(Self::Player4),
+            "player5" => Ok(Self::Player5),
+            "player6" => Ok(Self::Player6),
             _ => Err(StoreError::CorruptData("unknown participant seat")),
         }
+    }
+
+    fn for_player(game_type: GameType, player: u8) -> Result<Self, StoreError> {
+        if player >= game_type.max_players() {
+            return Err(StoreError::CorruptData("player exceeds game capacity"));
+        }
+        match game_type {
+            GameType::Solitaire => Ok(Self::Solitaire),
+            GameType::Checkers => Ok(if player == 0 { Self::Red } else { Self::Black }),
+            _ => [
+                Self::Player1,
+                Self::Player2,
+                Self::Player3,
+                Self::Player4,
+                Self::Player5,
+                Self::Player6,
+            ]
+            .get(usize::from(player))
+            .copied()
+            .ok_or(StoreError::CorruptData("unknown player index")),
+        }
+    }
+
+    fn player_index(self, game_type: GameType) -> Result<u8, StoreError> {
+        let player = match self {
+            Self::Solitaire | Self::Red | Self::Player1 => 0,
+            Self::Black | Self::Player2 => 1,
+            Self::Player3 => 2,
+            Self::Player4 => 3,
+            Self::Player5 => 4,
+            Self::Player6 => 5,
+        };
+        if Self::for_player(game_type, player)? != self {
+            return Err(StoreError::CorruptData("seat does not match game type"));
+        }
+        Ok(player)
     }
 }
 
@@ -108,8 +164,7 @@ impl Store {
 
     pub async fn migrate(&self) -> Result<(), StoreError> {
         let mut connection = self.pool.acquire().await?;
-        // Multiple API replicas may start together. This session-level lock serializes
-        // migrations and is released automatically if the database connection dies.
+        // Migrations across API replicas must be serialized before serving traffic.
         sqlx::query("SELECT pg_advisory_lock(716201491)")
             .execute(&mut *connection)
             .await?;
@@ -125,7 +180,43 @@ impl Store {
     }
 
     pub async fn health_check(&self) -> Result<(), StoreError> {
-        // Readiness must fail until the migration job created the authoritative tables.
+        let applied_migrations = sqlx::query_as::<_, AppliedMigration>(
+            "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let expected_migrations = MIGRATOR
+            .iter()
+            .filter(|migration| migration.migration_type.is_up_migration())
+            .collect::<Vec<_>>();
+
+        for migration in &expected_migrations {
+            let Some(applied_migration) = applied_migrations
+                .iter()
+                .find(|applied_migration| applied_migration.version == migration.version)
+            else {
+                return Err(
+                    sqlx::migrate::MigrateError::VersionNotPresent(migration.version).into(),
+                );
+            };
+            if !applied_migration.success {
+                return Err(sqlx::migrate::MigrateError::Dirty(migration.version).into());
+            }
+            if applied_migration.checksum != migration.checksum.as_ref() {
+                return Err(sqlx::migrate::MigrateError::VersionMismatch(migration.version).into());
+            }
+        }
+
+        if let Some(unexpected_migration) = applied_migrations.iter().find(|applied_migration| {
+            !expected_migrations
+                .iter()
+                .any(|migration| migration.version == applied_migration.version)
+        }) {
+            return Err(
+                sqlx::migrate::MigrateError::VersionMissing(unexpected_migration.version).into(),
+            );
+        }
+
         sqlx::query("SELECT 1 FROM game_sessions LIMIT 0")
             .execute(&self.pool)
             .await?;
@@ -140,17 +231,13 @@ impl Store {
         let id = Uuid::new_v4();
         let participant_id = Uuid::new_v4();
         let (access_token, token_hash) = new_access_token();
-        let seat = match game_type {
-            GameType::Solitaire => Seat::Solitaire,
-            GameType::Checkers => Seat::Red,
-        };
-        let status = match game_type {
-            GameType::Solitaire => SessionStatus::Active,
-            GameType::Checkers => SessionStatus::Lobby,
+        let seat = Seat::for_player(game_type, 0)?;
+        let status = if game_type == GameType::Solitaire {
+            SessionStatus::Active
+        } else {
+            SessionStatus::Lobby
         };
         let state = GameState::new(game_type, rand::random());
-        let state_json = Json(serde_json::to_value(&state)?);
-
         let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO game_sessions (id, game_type, state, status) \
@@ -158,26 +245,25 @@ impl Store {
         )
         .bind(id)
         .bind(game_type.as_db())
-        .bind(state_json)
+        .bind(Json(serde_json::to_value(&state)?))
         .bind(status.as_db())
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "INSERT INTO session_participants (id, session_id, seat, display_name, token_hash) \
-             VALUES ($1, $2, $3, $4, $5)",
+        insert_participant(
+            &mut transaction,
+            participant_id,
+            id,
+            seat,
+            &display_name,
+            token_hash,
         )
-        .bind(participant_id)
-        .bind(id)
-        .bind(seat.as_db())
-        .bind(&display_name)
-        .bind(token_hash)
-        .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
 
         let participant = Participant {
             id: participant_id,
             seat,
+            player_index: 0,
             display_name,
         };
         Ok(SessionAccess {
@@ -185,7 +271,7 @@ impl Store {
             session: SessionView {
                 id,
                 game_type,
-                state,
+                state: state.view_for(0),
                 state_version: 0,
                 status,
                 you: participant.clone(),
@@ -194,54 +280,67 @@ impl Store {
         })
     }
 
-    pub async fn join_checkers(
+    pub async fn join_session(
         &self,
         id: Uuid,
         display_name: String,
     ) -> Result<SessionAccess, StoreError> {
-        let participant_id = Uuid::new_v4();
-        let (access_token, token_hash) = new_access_token();
         let mut transaction = self.pool.begin().await?;
-        let session = sqlx::query_as::<_, SessionMetadataRow>(
-            "SELECT game_type::text AS game_type, status::text AS status \
+        let mut row = sqlx::query_as::<_, SessionRow>(
+            "SELECT id, game_type::text AS game_type, state, state_version, status::text AS status \
              FROM game_sessions WHERE id = $1 FOR UPDATE",
         )
         .bind(id)
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(StoreError::NotFound)?;
-
-        if parse_game_type(&session.game_type)? != GameType::Checkers {
+        let (game_type, state, status) = decode_session(&row)?;
+        if game_type == GameType::Solitaire {
+            return Err(StoreError::Conflict("solitaire sessions are single player"));
+        }
+        if status != SessionStatus::Lobby {
             return Err(StoreError::Conflict(
-                "only checkers sessions accept a second player",
+                "this session is no longer accepting players",
             ));
         }
-        if SessionStatus::parse(&session.status)? != SessionStatus::Lobby {
-            return Err(StoreError::Conflict(
-                "this session is no longer waiting for an opponent",
-            ));
+        let mut participants = participants(&mut transaction, id, game_type).await?;
+        let player_index = u8::try_from(participants.len())
+            .map_err(|_| StoreError::CorruptData("invalid participant count"))?;
+        if player_index >= game_type.max_players() {
+            return Err(StoreError::Conflict("this session is full"));
         }
-
-        sqlx::query(
-            "INSERT INTO session_participants (id, session_id, seat, display_name, token_hash) \
-             VALUES ($1, $2, 'black', $3, $4)",
+        let seat = Seat::for_player(game_type, player_index)?;
+        let participant_id = Uuid::new_v4();
+        let (access_token, token_hash) = new_access_token();
+        insert_participant(
+            &mut transaction,
+            participant_id,
+            id,
+            seat,
+            &display_name,
+            token_hash,
         )
-        .bind(participant_id)
-        .bind(id)
-        .bind(&display_name)
-        .bind(token_hash)
-        .execute(&mut *transaction)
         .await?;
-        sqlx::query("UPDATE game_sessions SET status = 'active', updated_at = NOW() WHERE id = $1")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
+        let you = Participant {
+            id: participant_id,
+            seat,
+            player_index,
+            display_name,
+        };
+        participants.push(you.clone());
+        let next_status = if game_type == GameType::Clue {
+            SessionStatus::Lobby
+        } else {
+            SessionStatus::Active
+        };
+        row.state_version = next_version(row.state_version)?;
+        row.status = next_status.as_db().to_owned();
+        persist_session(&mut transaction, &row, &state).await?;
+        let view = session_view(&row, &state, you, participants)?;
         transaction.commit().await?;
-
-        let session = self.load_authorized(id, &access_token).await?;
         Ok(SessionAccess {
             access_token,
-            session,
+            session: view,
         })
     }
 
@@ -250,20 +349,57 @@ impl Store {
         id: Uuid,
         access_token: &str,
     ) -> Result<SessionView, StoreError> {
-        let row = sqlx::query_as::<_, AuthorizedSessionRow>(
-            "SELECT s.id, s.game_type::text AS game_type, s.state, s.state_version, \
-                    s.status::text AS status, p.id AS participant_id, p.seat, p.display_name \
-             FROM game_sessions s \
-             INNER JOIN session_participants p ON p.session_id = s.id \
-             WHERE s.id = $1 AND p.token_hash = $2",
-        )
-        .bind(id)
-        .bind(hash_access_token(access_token))
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(StoreError::Unauthorized)?;
+        let mut transaction = self.pool.begin().await?;
+        // The shared row lock keeps state and membership from different queries consistent.
+        let authorized = authorized_row(&mut transaction, id, access_token, false).await?;
+        let (game_type, state, _) = decode_session(&authorized.session)?;
+        let you = authorized.participant(game_type)?;
+        let players = participants(&mut transaction, id, game_type).await?;
+        let view = session_view(&authorized.session, &state, you, players)?;
+        transaction.commit().await?;
+        Ok(view)
+    }
 
-        self.view_from_authorized_row(row).await
+    pub async fn start_session(
+        &self,
+        id: Uuid,
+        access_token: &str,
+    ) -> Result<SessionView, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let mut authorized = authorized_row(&mut transaction, id, access_token, true).await?;
+        let (game_type, mut state, status) = decode_session(&authorized.session)?;
+        let you = authorized.participant(game_type)?;
+        if you.player_index != 0 {
+            return Err(StoreError::Forbidden("only the host can start the game"));
+        }
+        if game_type != GameType::Clue || status != SessionStatus::Lobby {
+            return Err(StoreError::Conflict("this session cannot be started"));
+        }
+        let players = participants(&mut transaction, id, game_type).await?;
+        if !(3..=6).contains(&players.len()) {
+            return Err(StoreError::Conflict("clue needs three to six players"));
+        }
+        let player_count = u8::try_from(players.len())
+            .map_err(|_| StoreError::CorruptData("invalid participant count"))?;
+        let GameState::Clue(game) = &mut state else {
+            return Err(StoreError::CorruptData("clue session has the wrong state"));
+        };
+        game.start(player_count)
+            .map_err(|error| StoreError::InvalidAction(error.to_string()))?;
+        authorized.session.state_version = next_version(authorized.session.state_version)?;
+        authorized.session.status = SessionStatus::Active.as_db().to_owned();
+        persist_session(&mut transaction, &authorized.session, &state).await?;
+        insert_event(
+            &mut transaction,
+            id,
+            authorized.session.state_version,
+            you.id,
+            json!({ "game_type": "clue", "action": { "kind": "start", "players": player_count } }),
+        )
+        .await?;
+        let view = session_view(&authorized.session, &state, you, players)?;
+        transaction.commit().await?;
+        Ok(view)
     }
 
     pub async fn apply_action(
@@ -271,28 +407,20 @@ impl Store {
         id: Uuid,
         access_token: &str,
         action: &GameAction,
+        expected_version: i64,
     ) -> Result<SessionView, StoreError> {
+        if expected_version < 0 {
+            return Err(StoreError::BadRequest(
+                "expected_version must be nonnegative",
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query_as::<_, AuthorizedSessionRow>(
-            "SELECT s.id, s.game_type::text AS game_type, s.state, s.state_version, \
-                    s.status::text AS status, p.id AS participant_id, p.seat, p.display_name \
-             FROM game_sessions s \
-             INNER JOIN session_participants p ON p.session_id = s.id \
-             WHERE s.id = $1 AND p.token_hash = $2 FOR UPDATE OF s",
-        )
-        .bind(id)
-        .bind(hash_access_token(access_token))
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(StoreError::Unauthorized)?;
-
-        let game_type = parse_game_type(&row.game_type)?;
-        let status = SessionStatus::parse(&row.status)?;
-        let seat = Seat::parse(&row.seat)?;
-        let mut state: GameState = serde_json::from_value(row.state.0)?;
-        if state.game_type() != game_type {
-            return Err(StoreError::CorruptData(
-                "stored game type and state do not agree",
+        let mut authorized = authorized_row(&mut transaction, id, access_token, true).await?;
+        let (game_type, mut state, status) = decode_session(&authorized.session)?;
+        let you = authorized.participant(game_type)?;
+        if expected_version != authorized.session.state_version {
+            return Err(StoreError::Conflict(
+                "the board changed; refresh before trying again",
             ));
         }
         if action.game_type() != game_type {
@@ -300,144 +428,199 @@ impl Store {
                 "action game type does not match the session".to_owned(),
             ));
         }
-
-        let next_status = match (&mut state, action) {
-            (GameState::Solitaire(game), GameAction::Solitaire(action)) => {
-                if seat != Seat::Solitaire || status != SessionStatus::Active {
-                    return Err(StoreError::Conflict(
-                        "this solitaire session cannot accept moves",
-                    ));
-                }
-                game.apply(action)
-                    .map_err(|error| StoreError::InvalidAction(error.to_string()))?;
-                if game.won {
-                    SessionStatus::Complete
-                } else {
-                    status
-                }
-            }
-            (GameState::Checkers(game), GameAction::Checkers(action)) => {
-                if status != SessionStatus::Active {
-                    return Err(StoreError::Conflict("waiting sessions cannot accept moves"));
-                }
-                let side = match seat {
-                    Seat::Red => Side::Red,
-                    Seat::Black => Side::Black,
-                    Seat::Solitaire => {
-                        return Err(StoreError::Conflict(
-                            "this player does not have a checkers seat",
-                        ));
-                    }
-                };
-                game.apply_move(side, action)
-                    .map_err(|error| StoreError::InvalidAction(error.to_string()))?;
-                if game.winner.is_some() {
-                    SessionStatus::Complete
-                } else {
-                    status
-                }
-            }
-            _ => {
-                return Err(StoreError::CorruptData(
-                    "state and action variants do not agree",
-                ));
-            }
-        };
-
-        let next_version = row
-            .state_version
-            .checked_add(1)
-            .ok_or(StoreError::CorruptData("state version overflow"))?;
-        sqlx::query(
-            "UPDATE game_sessions \
-             SET state = $2, state_version = $3, status = $4::session_status, updated_at = NOW() \
-             WHERE id = $1",
-        )
-        .bind(id)
-        .bind(Json(serde_json::to_value(&state)?))
-        .bind(next_version)
-        .bind(next_status.as_db())
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "INSERT INTO game_events (session_id, state_version, participant_id, action) \
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(id)
-        .bind(next_version)
-        .bind(row.participant_id)
-        .bind(Json(serde_json::to_value(action)?))
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-
-        self.load_authorized(id, access_token).await
-    }
-
-    async fn view_from_authorized_row(
-        &self,
-        row: AuthorizedSessionRow,
-    ) -> Result<SessionView, StoreError> {
-        let game_type = parse_game_type(&row.game_type)?;
-        let state: GameState = serde_json::from_value(row.state.0)?;
-        if state.game_type() != game_type {
-            return Err(StoreError::CorruptData(
-                "stored game type and state do not agree",
+        if status != SessionStatus::Active {
+            return Err(StoreError::Conflict(
+                "only active sessions accept game actions",
             ));
         }
-        let you = Participant {
-            id: row.participant_id,
-            seat: Seat::parse(&row.seat)?,
-            display_name: row.display_name,
-        };
-        let participants = self.participants(row.id).await?;
-        Ok(SessionView {
-            id: row.id,
-            game_type,
-            state,
-            state_version: row.state_version,
-            status: SessionStatus::parse(&row.status)?,
-            you,
-            participants,
-        })
-    }
-
-    async fn participants(&self, session_id: Uuid) -> Result<Vec<Participant>, StoreError> {
-        let rows = sqlx::query_as::<_, ParticipantRow>(
-            "SELECT id, seat, display_name FROM session_participants \
-             WHERE session_id = $1 ORDER BY seat",
+        state
+            .apply(you.player_index, action)
+            .map_err(StoreError::InvalidAction)?;
+        authorized.session.state_version = next_version(authorized.session.state_version)?;
+        authorized.session.status = if state.is_complete() {
+            SessionStatus::Complete
+        } else {
+            SessionStatus::Active
+        }
+        .as_db()
+        .to_owned();
+        persist_session(&mut transaction, &authorized.session, &state).await?;
+        insert_event(
+            &mut transaction,
+            id,
+            authorized.session.state_version,
+            you.id,
+            serde_json::to_value(action)?,
         )
-        .bind(session_id)
-        .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(Participant {
-                    id: row.id,
-                    seat: Seat::parse(&row.seat)?,
-                    display_name: row.display_name,
-                })
-            })
-            .collect()
+        let players = participants(&mut transaction, id, game_type).await?;
+        let view = session_view(&authorized.session, &state, you, players)?;
+        transaction.commit().await?;
+        Ok(view)
     }
 }
 
-#[derive(Debug, FromRow)]
-struct SessionMetadataRow {
-    game_type: String,
-    status: String,
+async fn insert_participant(
+    connection: &mut PgConnection,
+    participant_id: Uuid,
+    session_id: Uuid,
+    seat: Seat,
+    display_name: &str,
+    token_hash: Vec<u8>,
+) -> Result<(), StoreError> {
+    sqlx::query("INSERT INTO session_participants (id, session_id, seat, display_name, token_hash) VALUES ($1, $2, $3, $4, $5)")
+        .bind(participant_id).bind(session_id).bind(seat.as_db()).bind(display_name).bind(token_hash)
+        .execute(connection).await?;
+    Ok(())
+}
+
+async fn persist_session(
+    connection: &mut PgConnection,
+    row: &SessionRow,
+    state: &GameState,
+) -> Result<(), StoreError> {
+    sqlx::query("UPDATE game_sessions SET state = $2, state_version = $3, status = $4::session_status, updated_at = NOW() WHERE id = $1")
+        .bind(row.id).bind(Json(serde_json::to_value(state)?)).bind(row.state_version).bind(&row.status)
+        .execute(connection).await?;
+    Ok(())
+}
+
+async fn insert_event(
+    connection: &mut PgConnection,
+    id: Uuid,
+    version: i64,
+    participant: Uuid,
+    action: Value,
+) -> Result<(), StoreError> {
+    sqlx::query("INSERT INTO game_events (session_id, state_version, participant_id, action) VALUES ($1, $2, $3, $4)")
+        .bind(id).bind(version).bind(participant).bind(Json(action)).execute(connection).await?;
+    Ok(())
+}
+
+async fn authorized_row(
+    connection: &mut PgConnection,
+    id: Uuid,
+    token: &str,
+    exclusive: bool,
+) -> Result<AuthorizedSessionRow, StoreError> {
+    let query = if exclusive {
+        "SELECT s.id, s.game_type::text AS game_type, s.state, s.state_version, s.status::text AS status, \
+         p.id AS participant_id, p.seat, p.display_name FROM game_sessions s \
+         INNER JOIN session_participants p ON p.session_id = s.id \
+         WHERE s.id = $1 AND p.token_hash = $2 FOR UPDATE OF s"
+    } else {
+        "SELECT s.id, s.game_type::text AS game_type, s.state, s.state_version, s.status::text AS status, \
+         p.id AS participant_id, p.seat, p.display_name FROM game_sessions s \
+         INNER JOIN session_participants p ON p.session_id = s.id \
+         WHERE s.id = $1 AND p.token_hash = $2 FOR SHARE OF s"
+    };
+    sqlx::query_as::<_, AuthorizedSessionRow>(query)
+        .bind(id)
+        .bind(hash_access_token(token))
+        .fetch_optional(connection)
+        .await?
+        .ok_or(StoreError::Unauthorized)
+}
+
+async fn participants(
+    connection: &mut PgConnection,
+    id: Uuid,
+    game_type: GameType,
+) -> Result<Vec<Participant>, StoreError> {
+    let rows = sqlx::query_as::<_, ParticipantRow>(
+        "SELECT id, seat, display_name FROM session_participants WHERE session_id = $1",
+    )
+    .bind(id)
+    .fetch_all(connection)
+    .await?;
+    let mut players = rows
+        .into_iter()
+        .map(|row| {
+            let seat = Seat::parse(&row.seat)?;
+            Ok(Participant {
+                id: row.id,
+                seat,
+                player_index: seat.player_index(game_type)?,
+                display_name: row.display_name,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    players.sort_by_key(|player| player.player_index);
+    if players
+        .iter()
+        .enumerate()
+        .any(|(index, player)| usize::from(player.player_index) != index)
+    {
+        return Err(StoreError::CorruptData(
+            "participant seats are not contiguous",
+        ));
+    }
+    Ok(players)
+}
+
+fn session_view(
+    row: &SessionRow,
+    state: &GameState,
+    you: Participant,
+    participants: Vec<Participant>,
+) -> Result<SessionView, StoreError> {
+    Ok(SessionView {
+        id: row.id,
+        game_type: state.game_type(),
+        state: state.view_for(you.player_index),
+        state_version: row.state_version,
+        status: SessionStatus::parse(&row.status)?,
+        you,
+        participants,
+    })
+}
+
+fn decode_session(row: &SessionRow) -> Result<(GameType, GameState, SessionStatus), StoreError> {
+    let game_type =
+        GameType::parse(&row.game_type).ok_or(StoreError::CorruptData("unknown game type"))?;
+    let state: GameState = serde_json::from_value(row.state.0.clone())?;
+    if state.game_type() != game_type {
+        return Err(StoreError::CorruptData(
+            "stored game type and state do not agree",
+        ));
+    }
+    Ok((game_type, state, SessionStatus::parse(&row.status)?))
+}
+
+fn next_version(version: i64) -> Result<i64, StoreError> {
+    version
+        .checked_add(1)
+        .ok_or(StoreError::CorruptData("state version overflow"))
 }
 
 #[derive(Debug, FromRow)]
-struct AuthorizedSessionRow {
+struct SessionRow {
     id: Uuid,
     game_type: String,
     state: Json<Value>,
     state_version: i64,
     status: String,
+}
+
+#[derive(Debug, FromRow)]
+struct AuthorizedSessionRow {
+    #[sqlx(flatten)]
+    session: SessionRow,
     participant_id: Uuid,
     seat: String,
     display_name: String,
+}
+
+impl AuthorizedSessionRow {
+    fn participant(&self, game_type: GameType) -> Result<Participant, StoreError> {
+        let seat = Seat::parse(&self.seat)?;
+        Ok(Participant {
+            id: self.participant_id,
+            seat,
+            player_index: seat.player_index(game_type)?,
+            display_name: self.display_name.clone(),
+        })
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -447,8 +630,11 @@ struct ParticipantRow {
     display_name: String,
 }
 
-fn parse_game_type(value: &str) -> Result<GameType, StoreError> {
-    GameType::parse(value).ok_or(StoreError::CorruptData("unknown game type"))
+#[derive(Debug, FromRow)]
+struct AppliedMigration {
+    version: i64,
+    success: bool,
+    checksum: Vec<u8>,
 }
 
 fn new_access_token() -> (String, Vec<u8>) {
@@ -475,6 +661,10 @@ pub enum StoreError {
     NotFound,
     #[error("session access is unauthorized")]
     Unauthorized,
+    #[error("bad request: {0}")]
+    BadRequest(&'static str),
+    #[error("session access is forbidden: {0}")]
+    Forbidden(&'static str),
     #[error("session conflict: {0}")]
     Conflict(&'static str),
     #[error("invalid game action: {0}")]

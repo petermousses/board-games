@@ -3,7 +3,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [develop, feature-three-tier-games]
+    branches: [develop, feature-three-tier-games, feat/threejs-classic-games]
 
 permissions:
   contents: read
@@ -29,15 +29,21 @@ jobs:
       DATABASE_URL: postgresql://board_games:ci-password@localhost:5432/board_games?sslmode=disable
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch migration baseline
+        run: git fetch --no-tags origin +refs/heads/develop:refs/remotes/origin/develop
       - uses: dtolnay/rust-toolchain@1.90
         with:
           components: rustfmt, clippy
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.12.0
       - uses: azure/setup-kubectl@v4
+      - name: Check migration integrity
+        run: node scripts/check-migration-integrity.mjs --baseline origin/develop
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test
-      - run: node --check web/app.js
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
       - run: kubectl kustomize deploy/k8s > /dev/null
