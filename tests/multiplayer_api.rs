@@ -166,12 +166,12 @@ async fn action(
     app: &Router,
     access: &Value,
     action: Value,
-    version: Option<i64>,
+    expected_version: i64,
 ) -> (StatusCode, Value) {
-    let mut body = json!({"action":{"game_type":access["game_type"],"action":action}});
-    if let Some(version) = version {
-        body["expected_version"] = json!(version);
-    }
+    let body = json!({
+        "expected_version": expected_version,
+        "action": {"game_type":access["game_type"],"action":action},
+    });
     request(
         app,
         "POST",
@@ -180,6 +180,16 @@ async fn action(
         Some(token(access)),
     )
     .await
+}
+
+async fn action_at_current_version(
+    app: &Router,
+    access: &Value,
+    game_action: Value,
+) -> (StatusCode, Value) {
+    let session = get(app, access).await.1;
+    let expected_version = session["state_version"].as_i64().expect("state version");
+    action(app, access, game_action, expected_version).await
 }
 
 async fn pool() -> sqlx::PgPool {
@@ -208,7 +218,10 @@ async fn bearer_tokens_cannot_read_act_on_or_start_other_sessions() {
             (
                 "POST",
                 "/actions",
-                Some(json!({"action":{"game_type":"clue","action":{"kind":"end_turn"}}})),
+                Some(json!({
+                    "expected_version": 0,
+                    "action":{"game_type":"clue","action":{"kind":"end_turn"}},
+                })),
             ),
         ] {
             let response = request(
@@ -308,22 +321,40 @@ async fn racing_clue_start_and_join_never_produces_an_undealt_active_player() {
 }
 
 #[tokio::test]
-async fn expected_versions_reject_stale_actions_and_legacy_omission_still_works() {
+async fn action_versions_are_required_and_replay_safe() {
     let app = app().await;
     let host = create(&app, "checkers").await;
     let guest = join(&app, id(&host)).await.1;
     let before = get(&app, &host).await.1;
     let movement = json!({"from":20,"path":[16]});
+    let missing = request(
+        &app,
+        "POST",
+        &format!("/api/v1/sessions/{}/actions", id(&host)),
+        Some(json!({"action":{"game_type":"checkers","action":movement.clone()}})),
+        Some(token(&host)),
+    )
+    .await;
+    assert_eq!(missing.0, StatusCode::BAD_REQUEST);
+    assert_eq!(missing.1, json!({"error":"expected_version is required"}));
+    assert_eq!(get(&app, &host).await.1, before);
+    assert_eq!(event_count(&host).await, 0);
+
+    let negative = action(&app, &host, movement.clone(), -1).await;
+    assert_eq!(negative.0, StatusCode::BAD_REQUEST);
     assert_eq!(
-        action(&app, &host, movement.clone(), Some(-1)).await.0,
-        StatusCode::BAD_REQUEST
+        negative.1,
+        json!({"error":"expected_version must be nonnegative"})
     );
+    assert_eq!(get(&app, &host).await.1, before);
+    assert_eq!(event_count(&host).await, 0);
+
     assert_eq!(
-        action(&app, &host, movement.clone(), Some(0)).await.0,
+        action(&app, &host, movement.clone(), 0).await.0,
         StatusCode::CONFLICT
     );
     assert_eq!(
-        action(&app, &guest, json!({"from":9,"path":[13]}), Some(1))
+        action(&app, &guest, json!({"from":9,"path":[13]}), 1)
             .await
             .0,
         StatusCode::UNPROCESSABLE_ENTITY
@@ -332,8 +363,8 @@ async fn expected_versions_reject_stale_actions_and_legacy_omission_still_works(
     assert_eq!(event_count(&host).await, 0);
 
     let (first, second) = tokio::join!(
-        action(&app, &host, movement.clone(), Some(1)),
-        action(&app, &host, movement, Some(1)),
+        action(&app, &host, movement.clone(), 1),
+        action(&app, &host, movement.clone(), 1),
     );
     let mut statuses = [first.0, second.0];
     statuses.sort();
@@ -342,8 +373,16 @@ async fn expected_versions_reject_stale_actions_and_legacy_omission_still_works(
     assert_eq!(fresh["state_version"], 2);
     assert_eq!(fresh["state"]["state"]["side_to_move"], "black");
     assert_eq!(event_count(&host).await, 1);
+    let replay = action(&app, &host, movement, 1).await;
+    assert_eq!(replay.0, StatusCode::CONFLICT);
     assert_eq!(
-        action(&app, &guest, json!({"from":9,"path":[13]}), None)
+        replay.1,
+        json!({"error":"the board changed; refresh before trying again"})
+    );
+    assert_eq!(get(&app, &host).await.1, fresh);
+    assert_eq!(event_count(&host).await, 1);
+    assert_eq!(
+        action(&app, &guest, json!({"from":9,"path":[13]}), 2)
             .await
             .0,
         StatusCode::OK
@@ -365,7 +404,7 @@ async fn event_insert_failure_rolls_back_the_game_snapshot() {
         .bind(uuid::Uuid::parse_str(host["you"]["id"].as_str().unwrap()).unwrap())
         .bind(sqlx::types::Json(json!({"fault":"reserved version"})))
         .execute(&database).await.expect("fault injection");
-    let response = action(&app, &host, json!({"from":20,"path":[16]}), Some(1)).await;
+    let response = action(&app, &host, json!({"from":20,"path":[16]}), 1).await;
     assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(response.1, json!({"error":"internal server error"}));
     assert_eq!(get(&app, &host).await.1, before);
@@ -423,7 +462,7 @@ async fn clue_responses_always_redact_other_hands_and_the_solution() {
         }
     }
     assert_eq!(seen_cards.len(), 18);
-    let moved = action(&app, &host, json!({"kind":"end_turn"}), None).await;
+    let moved = action_at_current_version(&app, &host, json!({"kind":"end_turn"})).await;
     assert_eq!(moved.0, StatusCode::OK);
     assert_no_private_keys(&moved.1);
 }
@@ -436,7 +475,7 @@ async fn battleship_fleets_stay_private_during_setup_and_play() {
     let guest = join(&app, id(&host)).await.1;
     assert_no_private_keys(&guest);
     let host_fleet = json!({"kind":"place_fleet","ships":(0..5).map(|row| json!({"row":row,"column":0,"horizontal":true})).collect::<Vec<_>>()});
-    let placed = action(&app, &host, host_fleet, None).await;
+    let placed = action_at_current_version(&app, &host, host_fleet).await;
     assert_eq!(placed.0, StatusCode::OK);
     assert_no_private_keys(&placed.1);
     assert_eq!(
@@ -465,16 +504,17 @@ async fn battleship_fleets_stay_private_during_setup_and_play() {
     );
     assert_no_private_keys(&guest_before);
     assert_eq!(
-        action(&app, &host, json!({"kind":"fire","row":5,"column":4}), None)
+        action_at_current_version(&app, &host, json!({"kind":"fire","row":5,"column":4}))
             .await
             .0,
         StatusCode::UNPROCESSABLE_ENTITY
     );
     let guest_fleet = json!({"kind":"place_fleet","ships":(5..10).map(|row| json!({"row":row,"column":4,"horizontal":true})).collect::<Vec<_>>()});
-    let placed_guest = action(&app, &guest, guest_fleet, None).await;
+    let placed_guest = action_at_current_version(&app, &guest, guest_fleet).await;
     assert_eq!(placed_guest.0, StatusCode::OK);
     assert_no_private_keys(&placed_guest.1);
-    let fired = action(&app, &host, json!({"kind":"fire","row":5,"column":4}), None).await;
+    let fired =
+        action_at_current_version(&app, &host, json!({"kind":"fire","row":5,"column":4})).await;
     assert_eq!(fired.0, StatusCode::OK);
     assert_no_private_keys(&fired.1);
     let targets = fired.1["state"]["state"]["target_board"]
@@ -508,11 +548,15 @@ async fn terminal_games_reject_actions_and_mismatched_game_actions_never_mutate_
     let host = create(&app, "tic_tac_toe").await;
     let guest = join(&app, id(&host)).await.1;
     let before = get(&app, &host).await.1;
+    let expected_version = before["state_version"].as_i64().expect("state version");
     let wrong = request(
         &app,
         "POST",
         &format!("/api/v1/sessions/{}/actions", id(&host)),
-        Some(json!({"action":{"game_type":"checkers","action":{"from":20,"path":[16]}}})),
+        Some(json!({
+            "expected_version": expected_version,
+            "action":{"game_type":"checkers","action":{"from":20,"path":[16]}},
+        })),
         Some(token(&host)),
     )
     .await;
@@ -521,7 +565,7 @@ async fn terminal_games_reject_actions_and_mismatched_game_actions_never_mutate_
     assert_eq!(event_count(&host).await, 0);
     for (access, square) in [(&host, 0), (&guest, 3), (&host, 1), (&guest, 4), (&host, 2)] {
         assert_eq!(
-            action(&app, access, json!({"kind":"place","square":square}), None)
+            action_at_current_version(&app, access, json!({"kind":"place","square":square}))
                 .await
                 .0,
             StatusCode::OK
@@ -532,7 +576,7 @@ async fn terminal_games_reject_actions_and_mismatched_game_actions_never_mutate_
     assert_eq!(completed["state"]["state"]["winner"], 0);
     assert_eq!(completed["state_version"], 6);
     assert_eq!(
-        action(&app, &guest, json!({"kind":"place","square":8}), None)
+        action_at_current_version(&app, &guest, json!({"kind":"place","square":8}))
             .await
             .0,
         StatusCode::CONFLICT

@@ -38,8 +38,11 @@ async fn checkers_join_and_concurrent_moves_are_serialized() {
         .expect("red token")
         .to_owned();
 
-    let rejected_lobby_move =
-        send_json(&app, action_request(&session_id, &red_token, 20, vec![16])).await;
+    let rejected_lobby_move = send_json(
+        &app,
+        action_request(&session_id, &red_token, 20, vec![16], 0),
+    )
+    .await;
     assert_eq!(rejected_lobby_move.0, StatusCode::CONFLICT);
 
     let joined = send_json(
@@ -56,12 +59,18 @@ async fn checkers_join_and_concurrent_moves_are_serialized() {
     assert_eq!(joined.1["status"], "active");
 
     let (first, second) = tokio::join!(
-        send_json(&app, action_request(&session_id, &red_token, 20, vec![16]),),
-        send_json(&app, action_request(&session_id, &red_token, 20, vec![16]),),
+        send_json(
+            &app,
+            action_request(&session_id, &red_token, 20, vec![16], 1),
+        ),
+        send_json(
+            &app,
+            action_request(&session_id, &red_token, 20, vec![16], 1),
+        ),
     );
     let mut statuses = [first.0, second.0];
     statuses.sort();
-    assert_eq!(statuses, [StatusCode::OK, StatusCode::UNPROCESSABLE_ENTITY]);
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
 
     let resumed = send_json(
         &app,
@@ -90,7 +99,13 @@ async fn checkers_join_and_concurrent_moves_are_serialized() {
     assert_eq!(unauthorized.0, StatusCode::UNAUTHORIZED);
 }
 
-fn action_request(session_id: &str, access_token: &str, from: u8, path: Vec<u8>) -> Request<Body> {
+fn action_request(
+    session_id: &str,
+    access_token: &str,
+    from: u8,
+    path: Vec<u8>,
+    expected_version: i64,
+) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(format!("/api/v1/sessions/{session_id}/actions"))
@@ -98,6 +113,7 @@ fn action_request(session_id: &str, access_token: &str, from: u8, path: Vec<u8>)
         .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
         .body(Body::from(
             json!({
+                "expected_version": expected_version,
                 "action": {
                     "game_type": "checkers",
                     "action": { "from": from, "path": path }

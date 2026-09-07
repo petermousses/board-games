@@ -2,7 +2,7 @@ use std::env;
 
 use board_games::{
     domain::{GameAction, GameType, checkers::CheckersMove, solitaire::SolitaireAction},
-    store::{MIGRATOR, Store},
+    store::{MIGRATOR, Store, StoreError},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -95,8 +95,30 @@ async fn additive_migration_preserves_legacy_games_tokens_and_events() {
             }),
             _ => unreachable!(),
         };
+        let negative_version = store
+            .apply_action(session_id, &token, &action, -1)
+            .await
+            .expect_err("negative versions must be rejected before mutation");
+        assert!(matches!(
+            negative_version,
+            StoreError::BadRequest("expected_version must be nonnegative")
+        ));
+        let after_rejected_version = store
+            .load_authorized(session_id, &token)
+            .await
+            .expect("legacy game is unchanged after rejected version");
+        assert_eq!(after_rejected_version.state, raw);
+        assert_eq!(after_rejected_version.state_version, 1);
+        let current_version = after_rejected_version.state_version;
+        let rejected_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM game_events WHERE session_id=$1")
+                .bind(session_id)
+                .fetch_one(&legacy_pool)
+                .await
+                .unwrap();
+        assert_eq!(rejected_count, 1);
         let updated = store
-            .apply_action(session_id, &token, &action, None)
+            .apply_action(session_id, &token, &action, current_version)
             .await
             .expect("continue legacy game");
         assert_eq!(updated.state_version, 2);

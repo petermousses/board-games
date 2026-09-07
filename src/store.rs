@@ -407,13 +407,18 @@ impl Store {
         id: Uuid,
         access_token: &str,
         action: &GameAction,
-        expected_version: Option<i64>,
+        expected_version: i64,
     ) -> Result<SessionView, StoreError> {
+        if expected_version < 0 {
+            return Err(StoreError::BadRequest(
+                "expected_version must be nonnegative",
+            ));
+        }
         let mut transaction = self.pool.begin().await?;
         let mut authorized = authorized_row(&mut transaction, id, access_token, true).await?;
         let (game_type, mut state, status) = decode_session(&authorized.session)?;
         let you = authorized.participant(game_type)?;
-        if expected_version.is_some_and(|version| version != authorized.session.state_version) {
+        if expected_version != authorized.session.state_version {
             return Err(StoreError::Conflict(
                 "the board changed; refresh before trying again",
             ));
@@ -656,6 +661,8 @@ pub enum StoreError {
     NotFound,
     #[error("session access is unauthorized")]
     Unauthorized,
+    #[error("bad request: {0}")]
+    BadRequest(&'static str),
     #[error("session access is forbidden: {0}")]
     Forbidden(&'static str),
     #[error("session conflict: {0}")]

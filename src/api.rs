@@ -107,14 +107,17 @@ async fn apply_action(
     Json(request): Json<ActionRequest>,
 ) -> Result<Json<SessionView>, ApiError> {
     let access_token = bearer_token(&headers)?;
-    if request.expected_version.is_some_and(|version| version < 0) {
+    let expected_version = request
+        .expected_version
+        .ok_or_else(|| ApiError::bad_request("expected_version is required"))?;
+    if expected_version < 0 {
         return Err(ApiError::bad_request(
             "expected_version must be nonnegative",
         ));
     }
     let session = state
         .store
-        .apply_action(id, &access_token, &request.action, request.expected_version)
+        .apply_action(id, &access_token, &request.action, expected_version)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(session))
@@ -134,8 +137,7 @@ struct JoinSessionRequest {
 #[derive(Debug, Deserialize)]
 struct ActionRequest {
     action: GameAction,
-    /// Omission preserves clients created before optimistic version checks existed.
-    #[serde(default)]
+    /// Required optimistic-concurrency version from the most recently loaded session.
     expected_version: Option<i64>,
 }
 
@@ -201,6 +203,7 @@ impl ApiError {
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         match error {
+            StoreError::BadRequest(message) => Self::bad_request(message),
             StoreError::NotFound => Self {
                 status: StatusCode::NOT_FOUND,
                 message: "session does not exist",
