@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { GAMES, cardLabel, fleetCells, randomFleet, ResponseGate, parseSaved, mergeSavedSessions, squareName } from "../lib.js";
+import { GAMES, cardLabel, fleetCells, randomFleet, ResponseGate, parseSaved, mergeSavedSessions, squareName, trimmedFormValue } from "../lib.js";
 import { boardModel } from "../boards.js";
 
 test("card zero is the ace of spades; only null/undefined are absent", () => {
@@ -40,6 +40,12 @@ test("v1 saved games migrate into the current session store", () => {
   const current = { [id]: { id, game_type: "chess", access_token: "b".repeat(43), label: "new seat" } };
   assert.deepEqual(mergeSavedSessions(null, JSON.stringify(legacy)), legacy);
   assert.deepEqual(mergeSavedSessions(JSON.stringify(current), JSON.stringify(legacy)), current);
+});
+test("captured form values survive disabling the submitted controls", () => {
+  const values = new FormData();
+  values.append("display_name", "  player two  ");
+  assert.equal(trimmedFormValue(values, "display_name"), "player two");
+  assert.equal(trimmedFormValue(new FormData(), "display_name"), "");
 });
 test("chess display maps row-major a8 through h1", () => {
   assert.equal(squareName(0), "a8");

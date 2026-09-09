@@ -15,6 +15,10 @@ export const cardRed = (card) => [1, 2].includes(Math.floor(card / 13));
 export const squareName = (index) => `${"abcdefgh"[index % 8]}${8 - Math.floor(index / 8)}`;
 export const playerIndex = (session) => session.you.player_index ?? ({ solitaire: 0, red: 0, black: 1 }[session.you.seat] ?? 0);
 export const samePile = (a, b) => !!a && !!b && a.kind === b.kind && a.index === b.index;
+export const trimmedFormValue = (formData, name) => {
+  const value = formData.get(name);
+  return typeof value === "string" ? value.trim() : "";
+};
 
 export function parseSaved(raw) {
   try {
