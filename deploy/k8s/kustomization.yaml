@@ -9,6 +9,7 @@ resources:
   - api.yaml
   - web.yaml
   - ingress.yaml
+  - middleware.yaml
   - certificate.yaml
   - certificate-staging.yaml
   - networkpolicy.yaml

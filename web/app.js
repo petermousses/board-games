@@ -1,4 +1,4 @@
-import { GAMES, escapeHtml as escape, fleetCells, mergeSavedSessions, playerIndex, randomFleet, samePile, ResponseGate } from "./lib.js";
+import { GAMES, escapeHtml as escape, fleetCells, mergeSavedSessions, playerIndex, randomFleet, samePile, ResponseGate, trimmedFormValue } from "./lib.js";
 import { boardModel } from "./boards.js";
 
 const API_ROOT = "/api/v1";
@@ -236,9 +236,10 @@ function renderJoin(id) {
   document.querySelector("#join-form").onsubmit = async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
+    const displayName = trimmedFormValue(new FormData(form), "display_name");
     formBusy(form, true);
     try {
-      const access = await request(`/sessions/${id}/join`, { method: "POST", body: { display_name: new FormData(form).get("display_name").trim() } });
+      const access = await request(`/sessions/${id}/join`, { method: "POST", body: { display_name: displayName } });
       saveSession(access);
       navigate(access.id);
     } catch (error) {

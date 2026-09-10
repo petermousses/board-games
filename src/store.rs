@@ -6,11 +6,16 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgConnection, PgPool, postgres::PgPoolOptions, types::Json};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::domain::{GameAction, GameState, GameType};
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+
+const SESSION_MAX_AGE_DAYS: i64 = 7;
+const SESSION_EVICTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const SESSION_EVICTION_BATCH_SIZE: i64 = 100;
 
 #[derive(Clone)]
 pub struct Store {
@@ -159,7 +164,70 @@ impl Store {
             .acquire_timeout(Duration::from_secs(5))
             .connect(database_url)
             .await?;
-        Ok(Self { pool })
+        let store = Self { pool };
+        store.spawn_session_eviction_worker();
+        Ok(store)
+    }
+
+    /// Delete sessions older than the fixed seven-day creation-age policy.
+    ///
+    /// Each batch locks candidate session rows before deleting their events and
+    /// participants in the same transaction. `SKIP LOCKED` leaves an
+    /// in-flight action alone; the next worker pass can remove that session
+    /// after the action transaction finishes.
+    pub async fn evict_stale_sessions(&self) -> Result<u64, StoreError> {
+        let mut evicted = 0;
+        loop {
+            let mut transaction = self.pool.begin().await?;
+            let session_ids = sqlx::query_scalar::<_, Uuid>(&format!(
+                "SELECT id FROM game_sessions \
+                 WHERE created_at < NOW() - INTERVAL '{SESSION_MAX_AGE_DAYS} days' \
+                 ORDER BY created_at \
+                 LIMIT {SESSION_EVICTION_BATCH_SIZE} \
+                 FOR UPDATE SKIP LOCKED"
+            ))
+            .fetch_all(&mut *transaction)
+            .await?;
+            if session_ids.is_empty() {
+                transaction.rollback().await?;
+                break;
+            }
+
+            sqlx::query("DELETE FROM game_events WHERE session_id = ANY($1)")
+                .bind(&session_ids)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM session_participants WHERE session_id = ANY($1)")
+                .bind(&session_ids)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM game_sessions WHERE id = ANY($1)")
+                .bind(&session_ids)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            evicted += u64::try_from(session_ids.len())
+                .map_err(|_| StoreError::CorruptData("eviction batch size overflow"))?;
+        }
+        Ok(evicted)
+    }
+
+    fn spawn_session_eviction_worker(&self) {
+        let store = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SESSION_EVICTION_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match store.evict_stale_sessions().await {
+                    Ok(evicted) if evicted > 0 => {
+                        info!(evicted, "evicted stale game sessions");
+                    }
+                    Ok(_) => {}
+                    Err(error) => warn!(%error, "stale session eviction failed"),
+                }
+            }
+        });
     }
 
     pub async fn migrate(&self) -> Result<(), StoreError> {

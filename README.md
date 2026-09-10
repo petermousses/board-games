@@ -13,7 +13,7 @@ a small, rust-backed web experience for persistent games, rendered as interactiv
 
 the application has three deployable tiers:
 
-1. **web:** Vite bundles a native ES-module Three.js client; nginx serves the static build and reverse-proxies same-origin `/api/` requests.
+1. **web:** Vite bundles a native ES-module Three.js client; nginx serves static frontend content while ingress routes `/api` directly to the API service.
 2. **api:** an axum service owns validation and every state transition. replicas retain no game state.
 3. **database:** PostgreSQL stores session snapshots, append-only action events, and hashed 256-bit per-seat bearer tokens.
 
@@ -38,13 +38,13 @@ npm ci
 npm run dev
 ```
 
-Set `API_PROXY_TARGET` when the API is not listening on `127.0.0.1:8080`. The production web container builds the same Vite bundle and supplies the proxy.
+Set `API_PROXY_TARGET` to override Vite's local development proxy target when the API is not listening on `127.0.0.1:8080`. This setting affects local Vite development only; the production web container does not use it.
 
 ## k3s deployment
 
 The GitHub Actions workflow in `.github/workflows/container-image.yml` builds and publishes both images to GHCR on pushes to `develop` and version tags. It gives each image commit-derived `sha-*` tags; use the resulting immutable image digests in `deploy/k8s/kustomization.yaml` for a registry-backed deployment. Do not deploy `latest` in a real environment.
 
-The checked-in manifests use the workflow’s `develop` tags as a bootstrap reference and pull them from GHCR. After publishing, update both image tags to the matching commit’s `sha-*` tag or, preferably, its resolved registry digest before applying the manifests.
+The checked-in manifests pin both application images to immutable registry digests in `deploy/k8s/kustomization.yaml`. After publishing, update both digests to the matching images’ resolved registry digests before applying the manifests.
 
 create the secret from `deploy/k8s/secret.example.yaml` **outside this repository** after replacing both placeholders with the same strong random password. This cluster serves the app at `games.omv.mousses.xyz`; other clusters should replace that host in `deploy/k8s/ingress.yaml` and the Certificate resources.
 
