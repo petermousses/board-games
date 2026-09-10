@@ -1,0 +1,12 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: board-games-api-rate-limit
+  labels:
+    app.kubernetes.io/name: board-games-api
+    app.kubernetes.io/part-of: board-games
+spec:
+  rateLimit:
+    average: 30
+    period: 1m
+    burst: 20
