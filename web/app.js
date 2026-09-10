@@ -1,5 +1,6 @@
 import { GAMES, escapeHtml as escape, fleetCells, mergeSavedSessions, playerIndex, randomFleet, samePile, ResponseGate, trimmedFormValue } from "./lib.js";
 import { boardModel } from "./boards.js";
+import { readLowPerformanceMode, writeLowPerformanceMode } from "./render-settings.js";
 
 const API_ROOT = "/api/v1";
 const SAVED_SESSIONS_KEY = "tabletop.saved-sessions.v2";
@@ -8,19 +9,21 @@ const app = document.querySelector("#app");
 const announcer = document.querySelector("#announcer");
 const responses = new ResponseGate();
 const memorySessions = {};
+const browserStorage = (() => { try { return window.localStorage; } catch { return null; } })();
 
 let currentSession = null;
 let table = null;
 let Table = null;
 let tableLoad = null;
 let graphicsUnavailable = false;
-let tableView = { top: false, orbit: false };
+let tableView = { top: false, orbit: true };
 let draft = {};
 let mutationInFlight = false;
 let pollTimer = null;
 let routeController = null;
 let keyboardChoices = [];
 let compactBoard = window.innerWidth < 800;
+let lowPerformanceMode = readLowPerformanceMode(browserStorage);
 
 function savedSessions() {
   try {
@@ -119,7 +122,7 @@ function ensureTable(sessionId) {
     return;
   }
   try {
-    table = new Table(canvas, handlePick, graphicsError);
+    table = new Table(canvas, handlePick, graphicsError, { lowPerformance: lowPerformanceMode });
     table.setTop(tableView.top);
     table.setOrbit(tableView.orbit);
   } catch {
@@ -137,7 +140,7 @@ async function renderRoute() {
   draft = {};
   mutationInFlight = false;
   graphicsUnavailable = false;
-  tableView = { top: false, orbit: false };
+  tableView = { top: false, orbit: true };
 
   const id = new URLSearchParams(location.search).get("session");
   const generation = responses.enter(id);
@@ -266,7 +269,7 @@ function renderSession() {
   const you = playerIndex(currentSession);
   if (document.querySelector("#session-root")?.dataset.id !== currentSession.id) {
     disposeTable();
-    app.innerHTML = `<section id="session-root" data-id="${escape(currentSession.id)}"><div class="game-topbar"><a href="/" class="back-link">← the collection</a><span class="session-saved"><span class="live-dot"></span> saved as you play</span></div><div class="game-heading"><div><p class="eyebrow">${escape(game.players)} · a seat for ${escape(currentSession.you.display_name)}</p><h1>${escape(game.name)}</h1></div><div id="participants" class="participants"></div></div><div id="invite"></div><div class="game-layout"><section class="table-wrap"><div class="table-toolbar"><span id="table-status"></span><span><button id="view-top" class="table-button" aria-pressed="false">top view</button><button id="view-orbit" class="table-button" aria-pressed="false">rotate</button></span></div><div id="game-canvas" class="game-canvas ${currentSession.game_type === "battleship" ? "fleet-canvas" : ""}"></div><p id="graphics-error" class="graphics-error" role="alert" hidden></p><div class="table-bottom"><span>rendered with Three.js</span><span>click a piece. make your move.</span></div></section><aside id="game-sidebar" class="game-sidebar"></aside></div><section class="below-table"><details><summary>how to play ${escape(game.name)}</summary><p>${escape(game.rules)}</p><p id="engine-rules"></p></details><details><summary>save your seat on another browser</summary><p>this private code grants this seat, including hidden cards. keep it to yourself.</p><button id="copy-private" class="secondary">copy private resume code</button></details></section></section>`;
+    app.innerHTML = `<section id="session-root" data-id="${escape(currentSession.id)}"><div class="game-topbar"><a href="/" class="back-link">← the collection</a><span class="session-saved"><span class="live-dot"></span> saved as you play</span></div><div class="game-heading"><div><p class="eyebrow">${escape(game.players)} · a seat for ${escape(currentSession.you.display_name)}</p><h1>${escape(game.name)}</h1></div><div id="participants" class="participants"></div></div><div id="invite"></div><div class="game-layout"><section class="table-wrap"><div class="table-toolbar"><div class="table-status-group"><span id="table-status"></span><span class="table-hint">drag to orbit · right-drag to pan · wheel to zoom</span></div><div class="table-controls"><button id="view-top" class="table-button" aria-pressed="false">top view</button><button id="view-orbit" class="table-button" aria-pressed="${tableView.orbit ? "true" : "false"}">rotate</button><button id="view-reset" class="table-button">reset view</button><label class="performance-toggle"><input id="low-performance" type="checkbox" ${lowPerformanceMode ? "checked" : ""}> low performance</label></div></div><div id="game-canvas" class="game-canvas ${currentSession.game_type === "battleship" ? "fleet-canvas" : ""}"></div><p id="graphics-error" class="graphics-error" role="alert" hidden></p><div class="table-bottom"><span>rendered with Three.js</span><span>click a piece. make your move.</span></div></section><aside id="game-sidebar" class="game-sidebar"></aside></div><section class="below-table"><details><summary>how to play ${escape(game.name)}</summary><p>${escape(game.rules)}</p><p id="engine-rules"></p></details><details><summary>save your seat on another browser</summary><p>this private code grants this seat, including hidden cards. keep it to yourself.</p><button id="copy-private" class="secondary">copy private resume code</button></details></section></section>`;
     document.querySelector("#view-top").onclick = (event) => {
       const active = event.currentTarget.getAttribute("aria-pressed") !== "true";
       event.currentTarget.setAttribute("aria-pressed", String(active));
@@ -278,6 +281,16 @@ function renderSession() {
       event.currentTarget.setAttribute("aria-pressed", String(active));
       tableView.orbit = active;
       table?.setOrbit(active);
+    };
+    document.querySelector("#view-reset").onclick = () => {
+      tableView.top = false;
+      document.querySelector("#view-top").setAttribute("aria-pressed", "false");
+      table?.resetView();
+    };
+    document.querySelector("#low-performance").onchange = (event) => {
+      lowPerformanceMode = event.currentTarget.checked;
+      if (!writeLowPerformanceMode(browserStorage, lowPerformanceMode)) toast("your browser blocked the performance preference.");
+      table?.setLowPerformance(lowPerformanceMode);
     };
     document.querySelector("#copy-private").onclick = () => copyResumeCode();
   }

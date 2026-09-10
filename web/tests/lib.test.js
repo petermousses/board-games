@@ -2,6 +2,29 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { GAMES, cardLabel, fleetCells, randomFleet, ResponseGate, parseSaved, mergeSavedSessions, squareName, trimmedFormValue } from "../lib.js";
 import { boardModel } from "../boards.js";
+import { cameraDefaults, parseLowPerformanceMode, readLowPerformanceMode, renderProfile, writeLowPerformanceMode } from "../render-settings.js";
+
+test("enhanced rendering is the default and low performance keeps the classic profile", () => {
+  assert.equal(renderProfile().name, "enhanced");
+  assert.equal(renderProfile(false).roundedGeometry, true);
+  assert.equal(renderProfile(true).name, "classic");
+  assert.equal(renderProfile(true).roundedGeometry, false);
+  assert.equal(parseLowPerformanceMode("true"), true);
+  assert.equal(parseLowPerformanceMode("false"), false);
+  assert.deepEqual(cameraDefaults(), { enablePan: true, screenSpacePanning: true, minZoom: 0.7, maxZoom: 2.6 });
+});
+
+test("low performance preference persists without making storage a hard dependency", () => {
+  const values = new Map();
+  const storage = { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+  assert.equal(readLowPerformanceMode(storage), false);
+  assert.equal(writeLowPerformanceMode(storage, true), true);
+  assert.equal(readLowPerformanceMode(storage), true);
+  assert.equal(writeLowPerformanceMode(storage, false), true);
+  assert.equal(readLowPerformanceMode(storage), false);
+  assert.equal(readLowPerformanceMode(null), false);
+  assert.equal(writeLowPerformanceMode(null, true), false);
+});
 
 test("card zero is the ace of spades; only null/undefined are absent", () => {
   assert.equal(cardLabel(0), "A♠");
