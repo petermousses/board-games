@@ -3,113 +3,64 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const nginxConfig = new URL("../nginx.conf", import.meta.url);
+const ingressManifest = new URL("../../deploy/k8s/ingress.yaml", import.meta.url);
+const networkPolicyManifest = new URL("../../deploy/k8s/networkpolicy.yaml", import.meta.url);
 
-// Six-player Clue is the largest supported multiplayer table. Each browser polls once per 3 seconds.
-const MAX_MULTIPLAYER_PLAYERS = 6;
-const POLL_INTERVAL_SECONDS = 3;
-const POLLS_PER_PLAYER_PER_MINUTE = 60 / POLL_INTERVAL_SECONDS;
-const SESSION_READS_PER_SOURCE_PER_MINUTE = MAX_MULTIPLAYER_PLAYERS * POLLS_PER_PLAYER_PER_MINUTE;
-
-// Keep action traffic at its existing conservative budget. Session reads get bounded headroom for six
-// participants sharing a NAT and for a synchronized poll batch.
-const GENERIC_API_RATE_PER_MINUTE = 30;
-const GENERIC_API_BURST = 20;
-const SESSION_READ_SOURCE_RATE_PER_MINUTE = 180;
-const SESSION_READ_SOURCE_BURST = 30;
-const SESSION_READ_IDENTITY_RATE_PER_MINUTE = 60;
-const SESSION_READ_IDENTITY_BURST = 12;
-
-function configuredZones(config) {
-  return new Map(
-    [...config.matchAll(/^\s*limit_req_zone\s+(\$\S+)\s+zone=(\w+):\S+\s+rate=(\d+)r\/m;\s*$/gm)]
-      .map(([, key, name, rate]) => [name, { key, rate: Number(rate) }]),
-  );
+function manifestByName(manifest, kind, name) {
+  const resource = manifest
+    .split(/^---\s*$/m)
+    .find((block) => new RegExp(`^kind: ${kind}$`, "m").test(block) && new RegExp(`^  name: ${name}$`, "m").test(block));
+  assert.ok(resource, `${kind} ${name} is missing`);
+  return resource;
 }
 
-function locationBlock(config, predicate) {
-  const lines = config.split("\n");
-  const start = lines.findIndex((line) => predicate(line.trim()));
-  assert.notEqual(start, -1, "expected nginx location is missing");
-  assert.ok(lines[start].trimEnd().endsWith("{"), "location must open a block");
-
-  let depth = 1;
-  const block = [lines[start]];
-  for (let index = start + 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    block.push(line);
-    depth += [...line].filter((character) => character === "{").length;
-    depth -= [...line].filter((character) => character === "}").length;
-    if (depth === 0) return block.join("\n");
-  }
-  assert.fail("unterminated nginx location block");
+function serviceBackend(ingress, path, service) {
+  const escapedPath = path.replaceAll("/", "\\/");
+  return new RegExp(
+    `^\\s+- path: ${escapedPath}\\s*$\\n` +
+      "\\s+pathType: Prefix\\s*\\n" +
+      "\\s+backend:\\s*\\n" +
+      "\\s+service:\\s*\\n" +
+      `\\s+name: ${service}\\s*$\\n` +
+      "\\s+port:\\s*\\n" +
+      "\\s+name: http\\s*$",
+    "m",
+  ).test(ingress);
 }
 
-test("session polling has an isolated, bounded dual rate limit", async () => {
+test("nginx serves frontend assets only and leaves API routing to ingress", async () => {
   const config = await readFile(nginxConfig, "utf8");
-  const zones = configuredZones(config);
 
-  // This captures the production failure mode before the specialized read policy exists.
-  assert.ok(
-    SESSION_READS_PER_SOURCE_PER_MINUTE > GENERIC_API_RATE_PER_MINUTE,
-    `${MAX_MULTIPLAYER_PLAYERS} players polling every ${POLL_INTERVAL_SECONDS}s exceed the generic API budget`,
+  assert.doesNotMatch(config, /^\s*(?:proxy_|fastcgi_|uwsgi_|scgi_|limit_req)/m);
+  assert.doesNotMatch(config, /^\s*location\b[^\n{]*\/api(?:\/|\s|\{|$)/m);
+  assert.deepEqual(
+    [...config.matchAll(/^\s*location\s+([^\n{]+)\s*\{/gm)].map(([, location]) => location.trim()),
+    ["= /healthz", "/"],
   );
-  assert.ok(
-    SESSION_READS_PER_SOURCE_PER_MINUTE < SESSION_READ_SOURCE_RATE_PER_MINUTE,
-    "the shared-source read budget must exceed six-player steady polling",
-  );
-  assert.ok(
-    POLLS_PER_PLAYER_PER_MINUTE < SESSION_READ_IDENTITY_RATE_PER_MINUTE,
-    "each authenticated participant needs a finite budget above its polling cadence",
-  );
-  assert.ok(
-    SESSION_READ_SOURCE_BURST >= MAX_MULTIPLAYER_PLAYERS,
-    "the shared-source burst must accept one synchronized six-player poll batch",
-  );
+  assert.match(config, /^\s*root \/usr\/share\/nginx\/html;\s*$/m);
+  assert.match(config, /^\s*try_files \$uri \$uri\/ \/index\.html;\s*$/m);
+});
 
-  assert.deepEqual(zones.get("game_requests"), {
-    key: "$binary_remote_addr",
-    rate: GENERIC_API_RATE_PER_MINUTE,
-  });
-  assert.deepEqual(zones.get("session_read_source"), {
-    key: "$binary_remote_addr",
-    rate: SESSION_READ_SOURCE_RATE_PER_MINUTE,
-  });
-  assert.deepEqual(zones.get("session_read_identity"), {
-    key: "$http_authorization",
-    rate: SESSION_READ_IDENTITY_RATE_PER_MINUTE,
-  });
-  assert.match(config, /^\s*limit_req_status 429;\s*$/m);
+test("ingress preserves the public host and TLS while routing API and frontend separately", async () => {
+  const ingress = await readFile(ingressManifest, "utf8");
 
-  const sessionLocation = locationBlock(
-    config,
-    (line) => line.startsWith('location ~ "^/api/v1/sessions/'),
-  );
-  const sessionPattern = /^\s*location\s+~\s+"(.+)"\s+\{\s*$/.exec(sessionLocation.split("\n", 1)[0]);
-  assert.ok(sessionPattern, "session polling must use a regex location");
-  const sessionPath = new RegExp(sessionPattern[1]);
-  const sessionId = "00000000-0000-4000-8000-000000000001";
-  assert.ok(sessionPath.test(`/api/v1/sessions/${sessionId}`), "the session detail path must use the read policy");
-  for (const stateChangingSuffix of ["/join", "/start", "/actions"]) {
-    assert.equal(
-      sessionPath.test(`/api/v1/sessions/${sessionId}${stateChangingSuffix}`),
-      false,
-      `${stateChangingSuffix} must remain outside the read policy`,
-    );
-  }
+  assert.match(ingress, /^\s*ingressClassName: traefik\s*$/m);
+  assert.match(ingress, /^\s+- games\.omv\.mousses\.xyz\s*$/m);
+  assert.match(ingress, /^\s+secretName: board-games-tls\s*$/m);
+  assert.ok(serviceBackend(ingress, "/api", "board-games-api"), "the /api prefix must route to the API");
+  assert.ok(serviceBackend(ingress, "/", "board-games-web"), "the / prefix must route to the frontend");
+  assert.ok(ingress.indexOf("- path: /api") < ingress.indexOf("- path: /\n"), "the API route must precede the catch-all");
+});
+
+test("network policy permits Traefik to reach the API service port", async () => {
+  const networkPolicy = await readFile(networkPolicyManifest, "utf8");
+  const traefikToApi = manifestByName(networkPolicy, "NetworkPolicy", "allow-traefik-to-api");
+
+  assert.match(traefikToApi, /podSelector:\s*\n\s+matchLabels:\s*\n\s+app\.kubernetes\.io\/name: board-games-api/);
+  assert.match(traefikToApi, /policyTypes: \[Ingress\]/);
   assert.match(
-    sessionLocation,
-    new RegExp(`^\\s*limit_req zone=session_read_source burst=${SESSION_READ_SOURCE_BURST} nodelay;\\s*$`, "m"),
+    traefikToApi,
+    /namespaceSelector:\s*\n\s+matchLabels:\s*\n\s+kubernetes\.io\/metadata\.name: kube-system\s*\n\s+podSelector:\s*\n\s+matchLabels:\s*\n\s+app\.kubernetes\.io\/name: traefik/,
   );
-  assert.match(
-    sessionLocation,
-    new RegExp(`^\\s*limit_req zone=session_read_identity burst=${SESSION_READ_IDENTITY_BURST} nodelay;\\s*$`, "m"),
-  );
-  assert.doesNotMatch(sessionLocation, /game_requests/);
-
-  const genericApiLocation = locationBlock(config, (line) => line === "location /api/ {");
-  assert.match(
-    genericApiLocation,
-    new RegExp(`^\\s*limit_req zone=game_requests burst=${GENERIC_API_BURST} nodelay;\\s*$`, "m"),
-  );
-  assert.doesNotMatch(genericApiLocation, /session_read_(?:source|identity)/);
+  assert.match(traefikToApi, /ports:\s*\n\s+- protocol: TCP\s*\n\s+port: 8080/);
 });
