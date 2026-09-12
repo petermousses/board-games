@@ -33,7 +33,7 @@ function serviceBackend(ingress, path, service) {
 test("nginx serves frontend assets only and leaves API routing to ingress", async () => {
   const config = await readFile(nginxConfig, "utf8");
 
-  assert.doesNotMatch(config, /^\s*(?:proxy(?:_[a-z_]+)?|limit_(?:req|conn|rate)(?:_[a-z_]+)?)\b/m);
+  assert.doesNotMatch(config, /^\s*(?:proxy(?:_(?!temp_path\b)[a-z_]+)?|limit_(?:req|conn|rate)(?:_[a-z_]+)?)\b/m);
   assert.doesNotMatch(config, /^\s*location\b[^\n{]*\/api(?:\/|\s|\{|$)/m);
   assert.deepEqual(
     [...config.matchAll(/^\s*location\s+([^\n{]+)\s*\{/gm)].map(([, location]) => location.trim()),
@@ -41,6 +41,18 @@ test("nginx serves frontend assets only and leaves API routing to ingress", asyn
   );
   assert.match(config, /^\s*root \/usr\/share\/nginx\/html;\s*$/m);
   assert.match(config, /^\s*try_files \$uri \$uri\/ \/index\.html;\s*$/m);
+});
+
+test("nginx keeps every request temp directory on the writable /tmp mount", async () => {
+  const config = await readFile(nginxConfig, "utf8");
+
+  for (const tempType of ["client_body", "proxy", "fastcgi", "uwsgi", "scgi"]) {
+    assert.match(
+      config,
+      new RegExp(`^\\s*${tempType}_temp_path /tmp/[^;]+;\\s*$`, "m"),
+      `${tempType} temp files must use the writable /tmp mount`,
+    );
+  }
 });
 
 test("ingress preserves the public host and TLS while routing API and frontend separately", async () => {
